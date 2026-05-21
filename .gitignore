@@ -1,0 +1,51 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+.venv/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Env (never commit secrets)
+.env
+.env.local
+.env.*.local
+!.env.example
+!**/.env.example
+
+# Next.js
+frontend/.next/
+frontend/out/
+frontend/.turbo
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs & coverage
+*.log
+npm-debug.log*
+pnpm-debug.log*
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+backend/data/
+
+# Vercel
+.vercel
+
+# TypeScript
+*.tsbuildinfo
