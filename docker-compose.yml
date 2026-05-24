@@ -1,0 +1,64 @@
+# Local stack: Redis + API + dashboard + workers.
+# Optional secrets: copy **/.env.example → **/.env.local (see README). Compose loads committed *.env.docker defaults.
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env.docker
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend/src:/app/src:ro
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      INTERNAL_API_URL: http://backend:8000
+      NEXT_PUBLIC_SLACK_APP_ID: ""
+    depends_on:
+      - backend
+
+  ingestion:
+    build:
+      context: ./workers/ingestion
+      dockerfile: Dockerfile
+    env_file:
+      - ./workers/ingestion/.env.docker
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      INGESTION_INTERVAL_MS: "60000"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  slack-bot:
+    build:
+      context: ./workers/slack-bot
+      dockerfile: Dockerfile
+    env_file:
+      - ./workers/slack-bot/.env.docker
+    depends_on:
+      - redis
+      - backend

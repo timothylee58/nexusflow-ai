@@ -1,0 +1,269 @@
+"""FastAPI routes — orchestration, SSE, audit, HITL."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import random
+from collections.abc import AsyncGenerator
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.agent.langgraph_orchestration import execute_orchestration
+from src.db.models import AgentAction, AuditLog
+from src.db.session import get_session
+from src.services.audit_service import write_audit_log
+from src.services.llm_provider import resolve_llm_provider
+from src.services.redis_service import AGENT_LOG_CHANNEL, redis_service
+
+logger = logging.getLogger(__name__)
+
+agent_router = APIRouter(prefix="/agent", tags=["agent"])
+sse_router = APIRouter(prefix="/sse", tags=["sse"])
+audit_router = APIRouter(prefix="/audit", tags=["audit"])
+
+
+class QueryRequest(BaseModel):
+    query: str
+    user_id: str = "user_default"
+    region: str | None = None
+
+
+class OrchestrateResponse(BaseModel):
+    action_id: str | None = None
+    parsed_command: dict | None = None
+    analysis: dict | None = None
+    decision: dict | None = None
+    execution_status: str
+    slack_message_ts: str = ""
+    execution_path: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+    llm_mode: str
+
+
+class HitlApprovalRequest(BaseModel):
+    decision_id: str
+    approval_choice: str
+    user_id: str = "dashboard_user"
+    notes: str = ""
+
+
+class AuditEventRequest(BaseModel):
+    event_type: str
+    user_id: str | None = None
+    user_input: str | None = None
+    execution_path: list[str] | None = None
+    timestamp: str | None = None
+    payload: dict | None = None
+
+
+@agent_router.post("/orchestrate", response_model=OrchestrateResponse)
+async def orchestrate_query(
+    request: QueryRequest,
+    session: AsyncSession = Depends(get_session),
+) -> OrchestrateResponse:
+    try:
+        logger.info("[Orchestrate] Query: %s", request.query)
+        result = await execute_orchestration(
+            user_input=request.query,
+            user_id=request.user_id,
+        )
+
+        action_id: str | None = None
+        if result.get("decision") and result.get("parsed_command"):
+            action = AgentAction(
+                user_id=request.user_id,
+                user_input=request.query,
+                parsed_command=json.dumps(result["parsed_command"]),
+                analysis=json.dumps(result["analysis"]) if result.get("analysis") else None,
+                decision=json.dumps(result["decision"]),
+                execution_status=result.get("execution_status", "pending"),
+                execution_path=json.dumps(result.get("execution_path", [])),
+                slack_message_ts=result.get("slack_message_ts") or None,
+            )
+            session.add(action)
+            await session.commit()
+            await session.refresh(action)
+            action_id = action.id
+
+            await write_audit_log(
+                session,
+                event_type="orchestration_executed",
+                user_id=request.user_id,
+                user_input=request.query,
+                execution_path=result.get("execution_path"),
+                severity=result["analysis"]["severity"] if result.get("analysis") else None,
+                estimated_impact=result["decision"]["estimated_impact"] if result.get("decision") else None,
+                payload={
+                    "action_id": action_id,
+                    "execution_status": result.get("execution_status"),
+                },
+            )
+
+        return OrchestrateResponse(
+            action_id=action_id,
+            parsed_command=result.get("parsed_command"),
+            analysis=result.get("analysis"),
+            decision=result.get("decision"),
+            execution_status=result.get("execution_status", "error"),
+            slack_message_ts=result.get("slack_message_ts", ""),
+            execution_path=result.get("execution_path", []),
+            errors=result.get("errors", []),
+            llm_mode=resolve_llm_provider(),
+        )
+    except Exception as exc:
+        logger.error("[Orchestrate] Error: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@agent_router.post("/hitl/approve")
+async def approve_decision(
+    body: HitlApprovalRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    if body.approval_choice not in {"approve", "reject"}:
+        raise HTTPException(status_code=400, detail="approval_choice must be approve or reject")
+
+    query = select(AgentAction).where(AgentAction.slack_message_ts == body.decision_id)
+    if not body.decision_id:
+        query = select(AgentAction).order_by(AgentAction.created_at.desc()).limit(1)
+
+    result = await session.execute(query)
+    action = result.scalar_one_or_none()
+    if not action:
+        raise HTTPException(status_code=404, detail="Action not found for decision_id")
+
+    if body.approval_choice == "approve":
+        action.execution_status = "executing"
+        await asyncio.sleep(0.05)
+        action.execution_status = "completed"
+    else:
+        action.execution_status = "rejected"
+
+    await write_audit_log(
+        session,
+        event_type=f"hitl_{body.approval_choice}",
+        user_id=body.user_id,
+        user_input=action.user_input,
+        approval_choice=body.approval_choice,
+        notes=body.notes,
+        payload={"decision_id": body.decision_id, "action_id": action.id},
+    )
+
+    await redis_service.publish(
+        AGENT_LOG_CHANNEL,
+        {
+            "node": "hitl",
+            "message": f"Decision {body.approval_choice}d by {body.user_id}",
+            "timestamp": datetime.utcnow().isoformat(),
+            "user_id": body.user_id,
+        },
+    )
+
+    await session.commit()
+    return {
+        "success": True,
+        "decision_id": body.decision_id,
+        "action_id": action.id,
+        "status": action.execution_status,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+@sse_router.get("/metrics")
+async def stream_metrics(request: Request) -> StreamingResponse:
+    async def metrics_generator() -> AsyncGenerator[str, None]:
+        regions = ["MY", "SG", "HK", "TW"]
+        while True:
+            if await request.is_disconnected():
+                break
+            for region in regions:
+                metrics = _mock_regional_metrics(region)
+                yield f"data: {json.dumps(metrics)}\n\n"
+                await asyncio.sleep(0.35)
+            await asyncio.sleep(1)
+
+    return StreamingResponse(
+        metrics_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@sse_router.get("/agent-log")
+async def stream_agent_log(request: Request) -> StreamingResponse:
+    async def log_generator() -> AsyncGenerator[str, None]:
+        async for message in redis_service.subscribe(AGENT_LOG_CHANNEL):
+            if await request.is_disconnected():
+                break
+            yield f"data: {message}\n\n"
+
+    return StreamingResponse(
+        log_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@audit_router.post("/log")
+async def log_audit_event(
+    body: AuditEventRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    entry = await write_audit_log(
+        session,
+        event_type=body.event_type,
+        user_id=body.user_id,
+        user_input=body.user_input,
+        execution_path=body.execution_path,
+        payload=body.payload,
+    )
+    return {
+        "success": True,
+        "id": entry.id,
+        "event_type": body.event_type,
+        "timestamp": body.timestamp or datetime.utcnow().isoformat(),
+    }
+
+
+@audit_router.get("/recent")
+async def recent_audit_logs(
+    limit: int = 20,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    query = select(AuditLog).order_by(AuditLog.created_at.desc()).limit(min(limit, 100))
+    result = await session.execute(query)
+    logs = result.scalars().all()
+    return {
+        "items": [
+            {
+                "id": log.id,
+                "event_type": log.event_type,
+                "user_id": log.user_id,
+                "user_input": log.user_input,
+                "approval_choice": log.approval_choice,
+                "created_at": log.created_at.isoformat(),
+            }
+            for log in logs
+        ]
+    }
+
+
+def _mock_regional_metrics(region: str) -> dict:
+    congestion = random.randint(30, 95)
+    return {
+        "type": "metrics_update",
+        "region": region,
+        "congestion": congestion,
+        "delivery_delay": random.randint(10, 80),
+        "avg_delivery_time": round(random.uniform(3, 6), 1),
+        "active_deliveries": random.randint(500, 2000),
+        "active_incidents": random.randint(0, 5 if congestion > 75 else 2),
+        "last_updated": datetime.utcnow().isoformat(),
+    }

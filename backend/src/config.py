@@ -1,0 +1,53 @@
+from functools import lru_cache
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=(".env.local", ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    environment: str = "development"
+    debug: bool = True
+    log_level: str = "INFO"
+
+    # LLM — LLM_PROVIDER: auto | heuristic | anthropic | openai | ilmu
+    llm_provider: str = "auto"
+
+    anthropic_api_key: str | None = None
+    anthropic_parse_model: str = "claude-3-5-haiku-20241022"
+    anthropic_analysis_model: str = "claude-3-5-sonnet-20241022"
+
+    openai_api_key: str | None = None
+    openai_base_url: str | None = None
+    openai_parse_model: str = "gpt-4o-mini"
+    openai_analysis_model: str = "gpt-4o"
+
+    ilmu_api_key: str | None = None
+    ilmu_base_url: str = "https://api.ilmu.ai/v1"
+    ilmu_parse_model: str = "ilmu-nemo-nano"
+    ilmu_analysis_model: str = "nemo-super"
+
+    database_url: str | None = None
+    neon_database_url: str | None = None
+    supabase_url: str | None = None
+    supabase_key: str | None = None
+    upstash_redis_rest_url: str | None = None
+    upstash_redis_rest_token: str | None = None
+    redis_url: str | None = None
+
+    slack_bot_token: str | None = None
+    slack_signing_secret: str | None = None
+    slack_app_id: str | None = None
+    slack_channel_id: str | None = None
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()

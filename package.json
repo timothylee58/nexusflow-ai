@@ -1,0 +1,15 @@
+{
+  "name": "nexusflow-ai",
+  "private": true,
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=18.17.0",
+    "pnpm": ">=8.0.0"
+  },
+  "scripts": {
+    "install:all": "pnpm install",
+    "dev:frontend": "pnpm --filter nexusflow-frontend dev",
+    "dev:ingestion": "pnpm --filter nexusflow-ingestion dev",
+    "dev:slack-bot": "pnpm --filter nexusflow-slack-bot dev"
+  }
+}
