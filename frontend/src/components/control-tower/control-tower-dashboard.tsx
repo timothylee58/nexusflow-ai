@@ -1,26 +1,33 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import {
-  AlertCircle,
-  AlertTriangle,
-  CheckCircle2,
-  TrendingUp,
-} from "lucide-react";
+import { useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import {
+  Activity,
+  AlertCircle,
+  ChevronRight,
+  Command,
+  Loader2,
+  TrendingUp,
+  AlertTriangle,
+  Wifi,
+  WifiOff,
+} from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Separator } from "@/components/ui/separator";
+import { AlertList } from "@/components/nexusops/AlertList";
+import { ActionDetails } from "@/components/nexusops/ActionDetails";
+import { ConfirmationPanel } from "@/components/nexusops/ConfirmationPanel";
+import { useSSE } from "@/hooks/useSSE";
+
+/* ─── Types ─────────────────────────────────────────────────────────────── */
 
 interface OrchestrationResult {
   action_id?: string;
-  parsed_command?: {
-    query_type: string;
-    region: string;
-    metric: string;
-  };
-  analysis?: {
-    summary: string;
-    severity: string;
-    confidence: number;
-  };
+  parsed_command?: { query_type: string; region: string; metric: string };
+  analysis?: { summary: string; severity: string; confidence: number };
   decision?: {
     target_action: string;
     estimated_impact: number;
@@ -34,7 +41,7 @@ interface OrchestrationResult {
   errors?: string[];
 }
 
-interface MetricPayload {
+interface RegionMetrics {
   region: string;
   congestion: number;
   avg_delivery_time: number;
@@ -48,417 +55,435 @@ interface AgentLogEntry {
   timestamp: string;
 }
 
-function useNLOrchestration() {
+/* ─── NL Command Bar ─────────────────────────────────────────────────────── */
+
+const SUGGESTIONS = [
+  "Show delivery bottlenecks in KL right now",
+  "Forecast demand for next week by region",
+  "Analyze cost trends across all routes",
+  "Check for fraud patterns in recent transactions",
+];
+
+function NLCommandBar({
+  onResult,
+}: {
+  onResult: (r: OrchestrationResult | null, loading: boolean) => void;
+}) {
+  const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [result, setResult] = useState<OrchestrationResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  async function executeCommand(input: string) {
+  async function executeCommand(query: string) {
+    const trimmed = query.trim();
+    if (!trimmed) return;
     setIsLoading(true);
     setError(null);
+    onResult(null, true);
+    setInput("");
 
     try {
-      const response = await fetch("/api/agent/orchestrate", {
+      const res = await fetch("/api/agent/orchestrate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: input, user_id: `user_${Date.now()}` }),
+        body: JSON.stringify({ query: trimmed, user_id: `user_${Date.now()}` }),
       });
-
-      if (!response.ok) {
-        const detail = await response.text();
-        throw new Error(detail || "Orchestration failed");
-      }
-
-      const data = (await response.json()) as OrchestrationResult;
-      setResult(data);
+      if (!res.ok) throw new Error(await res.text());
+      const data = (await res.json()) as OrchestrationResult;
+      onResult(data, false);
 
       await fetch("/api/audit/log", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           event_type: "nl_command_executed",
-          user_input: input,
+          user_input: trimmed,
           execution_path: data.execution_path,
           timestamp: new Date().toISOString(),
         }),
       });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unknown error");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Unknown error");
+      onResult(null, false);
     } finally {
       setIsLoading(false);
     }
   }
 
-  return { executeCommand, result, isLoading, error };
-}
-
-function useRealTimeMetrics() {
-  const [metrics, setMetrics] = useState<Record<string, MetricPayload>>({});
-  const eventSourceRef = useRef<EventSource | null>(null);
-
-  useEffect(() => {
-    const eventSource = new EventSource("/api/sse/metrics");
-
-    eventSource.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data) as MetricPayload;
-        setMetrics((prev) => ({ ...prev, [data.region]: data }));
-      } catch {
-        /* ignore malformed chunks */
-      }
-    };
-
-    eventSource.onerror = () => eventSource.close();
-    eventSourceRef.current = eventSource;
-
-    return () => {
-      eventSourceRef.current?.close();
-    };
-  }, []);
-
-  return metrics;
-}
-
-async function submitHitlDecision(
-  decisionId: string,
-  approvalChoice: "approve" | "reject",
-) {
-  await fetch("/api/agent/hitl/approve", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      decision_id: decisionId,
-      approval_choice: approvalChoice,
-      user_id: "dashboard_user",
-    }),
-  });
-}
-
-export function NLCommandBar() {
-  const [input, setInput] = useState("");
-  const { executeCommand, result, isLoading, error } = useNLOrchestration();
-
-  const suggestions = [
-    "Show delivery bottlenecks in KL right now",
-    "Forecast demand for next week by region",
-    "Analyze cost trends across all routes",
-    "Check for fraud patterns in recent transactions",
-  ];
-
-  function handleSubmit() {
-    const trimmed = input.trim();
-    if (!trimmed) return;
-    executeCommand(trimmed);
-    setInput("");
-  }
-
   return (
     <motion.div
-      initial={{ opacity: 0, y: -20 }}
+      initial={{ opacity: 0, y: -16 }}
       animate={{ opacity: 1, y: 0 }}
-      className="space-y-4 rounded-xl border border-blue-500/30 bg-gradient-to-r from-slate-900 to-slate-800 p-6"
+      className="rounded-xl border border-primary/20 bg-gradient-to-r from-slate-900 to-slate-800 p-5 space-y-3"
     >
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <Command className="h-3.5 w-3.5" />
+        <span>Natural Language Orchestration</span>
+      </div>
+
       <div className="flex flex-col gap-2 sm:flex-row">
         <input
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
-          placeholder="Try: Show KL bottlenecks or Analyze fraud patterns"
-          className="flex-1 rounded-lg border border-slate-600 bg-slate-950 px-4 py-3 text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          onKeyDown={(e) => e.key === "Enter" && executeCommand(input)}
+          placeholder="Try: Show KL bottlenecks or Analyze fraud patterns…"
+          className="flex-1 rounded-lg border border-border bg-background/80 px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
           disabled={isLoading}
         />
-        <button
-          type="button"
-          onClick={handleSubmit}
+        <Button
+          onClick={() => executeCommand(input)}
           disabled={isLoading || !input.trim()}
-          className="rounded-lg bg-blue-600 px-6 py-3 font-medium text-white transition hover:bg-blue-500 disabled:opacity-50"
+          className="gap-2"
         >
-          {isLoading ? "Processing…" : "Execute"}
-        </button>
+          {isLoading ? (
+            <>
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Processing…
+            </>
+          ) : (
+            <>
+              Execute
+              <ChevronRight className="h-4 w-4" />
+            </>
+          )}
+        </Button>
       </div>
 
-      {!result && (
-        <div className="flex flex-wrap gap-2">
-          {suggestions.map((cmd) => (
-            <button
-              key={cmd}
-              type="button"
-              onClick={() => executeCommand(cmd)}
-              className="rounded-full border border-slate-600 bg-slate-900 px-3 py-1 text-xs text-slate-300 transition hover:border-blue-500"
-            >
-              {cmd}
-            </button>
-          ))}
-        </div>
-      )}
+      <div className="flex flex-wrap gap-1.5">
+        {SUGGESTIONS.map((s) => (
+          <button
+            key={s}
+            type="button"
+            onClick={() => executeCommand(s)}
+            disabled={isLoading}
+            className="rounded-full border border-border bg-secondary/40 px-2.5 py-1 text-xs text-muted-foreground transition hover:border-primary/40 hover:text-foreground disabled:opacity-40"
+          >
+            {s}
+          </button>
+        ))}
+      </div>
 
       <AnimatePresence>
-        {result && (
+        {error && (
           <motion.div
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
             exit={{ opacity: 0, height: 0 }}
-            className="space-y-3 rounded-lg border border-emerald-500/30 bg-slate-950/80 p-4"
+            className="flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-red-300"
           >
-            <p className="text-xs text-slate-400">
-              Path: {result.execution_path.join(" → ")} · mode: {result.llm_mode}
-            </p>
-
-            {result.parsed_command && (
-              <p className="text-sm text-slate-300">
-                {result.parsed_command.query_type} · {result.parsed_command.region} ·{" "}
-                {result.parsed_command.metric}
-              </p>
-            )}
-
-            {result.analysis && (
-              <div className="space-y-1 text-sm">
-                <p className="text-slate-200">{result.analysis.summary}</p>
-                <span
-                  className={`inline-block rounded px-2 py-0.5 text-xs font-semibold ${
-                    result.analysis.severity === "critical"
-                      ? "bg-red-500/20 text-red-300"
-                      : result.analysis.severity === "high"
-                        ? "bg-orange-500/20 text-orange-300"
-                        : "bg-yellow-500/20 text-yellow-300"
-                  }`}
-                >
-                  {result.analysis.severity.toUpperCase()}
-                </span>
-              </div>
-            )}
-
-            {result.decision && (
-              <DecisionDisplay
-                decision={result.decision}
-                slackMessageTs={result.slack_message_ts}
-              />
-            )}
+            <AlertCircle className="h-4 w-4 shrink-0" />
+            {error}
           </motion.div>
         )}
       </AnimatePresence>
-
-      {error && (
-        <div className="flex items-start gap-2 rounded-lg border border-red-500/40 bg-red-950/40 p-3 text-sm text-red-200">
-          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-          <span>{error}</span>
-        </div>
-      )}
     </motion.div>
   );
 }
 
-function DecisionDisplay({
-  decision,
-  slackMessageTs,
-}: {
-  decision: NonNullable<OrchestrationResult["decision"]>;
-  slackMessageTs?: string;
-}) {
-  const [status, setStatus] = useState<string | null>(null);
+/* ─── Metrics Grid ───────────────────────────────────────────────────────── */
 
-  async function handleChoice(choice: "approve" | "reject") {
-    if (!slackMessageTs) return;
-    await submitHitlDecision(slackMessageTs, choice);
-    setStatus(choice === "approve" ? "Approved" : "Rejected");
-  }
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, scale: 0.98 }}
-      animate={{ opacity: 1, scale: 1 }}
-      className="space-y-3 rounded-lg border border-slate-700 bg-slate-900/60 p-4"
-    >
-      <div className="flex items-center gap-2">
-        {decision.requires_approval ? (
-          <AlertTriangle className="h-5 w-5 text-orange-400" />
-        ) : (
-          <CheckCircle2 className="h-5 w-5 text-emerald-400" />
-        )}
-        <span className="font-semibold text-slate-200">
-          {decision.requires_approval ? "AWAITING APPROVAL" : "AUTO-EXECUTED"}
-        </span>
-      </div>
-
-      <p className="text-sm text-slate-400">{decision.reasoning}</p>
-      <p className="text-sm text-slate-300">
-        Action: <span className="font-mono">{decision.target_action}</span> · Impact: RM
-        {decision.estimated_impact.toLocaleString()}
-      </p>
-
-      {decision.requires_approval && slackMessageTs && !status && (
-        <div className="flex gap-2">
-          <button
-            type="button"
-            onClick={() => handleChoice("approve")}
-            className="flex-1 rounded bg-emerald-600/20 py-2 text-sm font-semibold text-emerald-300 hover:bg-emerald-600/30"
-          >
-            Approve
-          </button>
-          <button
-            type="button"
-            onClick={() => handleChoice("reject")}
-            className="flex-1 rounded bg-red-600/20 py-2 text-sm font-semibold text-red-300 hover:bg-red-600/30"
-          >
-            Reject
-          </button>
-        </div>
-      )}
-
-      {status && <p className="text-sm font-medium text-emerald-300">{status}</p>}
-    </motion.div>
-  );
-}
-
-export function MetricsGrid() {
-  const metrics = useRealTimeMetrics();
-  const regions = ["MY", "SG", "HK", "TW"];
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ delay: 0.1 }}
-      className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4"
-    >
-      {regions.map((region) => (
-        <MetricCard key={region} region={region} data={metrics[region]} />
-      ))}
-    </motion.div>
-  );
-}
-
-function MetricCard({ region, data }: { region: string; data?: MetricPayload }) {
+function MetricCard({ region, data }: { region: string; data?: RegionMetrics }) {
   if (!data) {
     return (
-      <div className="animate-pulse rounded-lg border border-slate-700 p-4">
-        <div className="mb-3 h-4 w-1/2 rounded bg-slate-700" />
-        <div className="h-3 rounded bg-slate-800" />
+      <div className="animate-pulse rounded-xl border border-border p-4">
+        <div className="mb-3 h-4 w-1/2 rounded bg-muted" />
+        <div className="space-y-2">
+          <div className="h-2 rounded bg-muted/60" />
+          <div className="h-3 rounded bg-muted/40" />
+        </div>
       </div>
     );
   }
 
-  const statusColor =
-    data.congestion < 60
-      ? "border-emerald-500/30 bg-emerald-950/20"
-      : data.congestion < 80
-        ? "border-yellow-500/30 bg-yellow-950/20"
-        : "border-red-500/30 bg-red-950/20";
+  const { congestion, active_deliveries, avg_delivery_time, active_incidents } = data;
+  const ringColor =
+    congestion < 60
+      ? "border-emerald-500/30"
+      : congestion < 80
+        ? "border-yellow-500/30"
+        : "border-red-500/30";
+  const barColor =
+    congestion < 60 ? "bg-emerald-500" : congestion < 80 ? "bg-yellow-500" : "bg-red-500";
 
   return (
-    <motion.div layout className={`rounded-lg border p-4 ${statusColor}`}>
-      <div className="mb-3 flex items-center justify-between">
-        <h3 className="text-lg font-bold text-slate-100">{region}</h3>
-        {data.congestion < 60 ? (
-          <TrendingUp className="h-4 w-4 text-emerald-400" />
-        ) : (
-          <AlertTriangle className="h-4 w-4 text-yellow-400" />
-        )}
+    <motion.div layout className={`rounded-xl border p-4 space-y-3 ${ringColor}`}>
+      <div className="flex items-center justify-between">
+        <h3 className="text-lg font-bold">{region}</h3>
+        <div className="flex items-center gap-1.5">
+          {active_incidents > 0 && (
+            <Badge variant="warning" className="text-[10px] px-1.5">
+              {active_incidents}
+            </Badge>
+          )}
+          {congestion < 60 ? (
+            <TrendingUp className="h-4 w-4 text-emerald-400" />
+          ) : (
+            <AlertTriangle className="h-4 w-4 text-yellow-400" />
+          )}
+        </div>
       </div>
-      <div className="mb-2 flex justify-between text-sm text-slate-300">
-        <span>Congestion</span>
-        <span className="font-mono font-semibold">{data.congestion}%</span>
+
+      <div>
+        <div className="mb-1 flex justify-between text-xs text-muted-foreground">
+          <span>Congestion</span>
+          <span className="font-mono font-semibold text-foreground">{congestion}%</span>
+        </div>
+        <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+          <motion.div
+            className={`h-full rounded-full ${barColor}`}
+            animate={{ width: `${congestion}%` }}
+            transition={{ duration: 0.4, ease: "easeOut" }}
+          />
+        </div>
       </div>
-      <div className="mb-3 h-2 rounded-full bg-slate-800">
-        <div
-          className={`h-2 rounded-full transition-all ${
-            data.congestion < 60
-              ? "bg-emerald-500"
-              : data.congestion < 80
-                ? "bg-yellow-500"
-                : "bg-red-500"
-          }`}
-          style={{ width: `${data.congestion}%` }}
-        />
-      </div>
-      <div className="grid grid-cols-2 gap-2 text-xs text-slate-400">
+
+      <div className="grid grid-cols-2 gap-2 text-xs text-muted-foreground">
         <div>
           <p>Deliveries</p>
-          <p className="font-semibold text-slate-200">{data.active_deliveries}</p>
+          <p className="font-semibold text-foreground">{active_deliveries.toLocaleString()}</p>
         </div>
         <div>
           <p>Avg time</p>
-          <p className="font-semibold text-slate-200">{data.avg_delivery_time}h</p>
+          <p className="font-semibold text-foreground">{avg_delivery_time}h</p>
         </div>
       </div>
     </motion.div>
   );
 }
 
-export function AgentActivityLog() {
-  const [activities, setActivities] = useState<AgentLogEntry[]>([]);
-  const [isOpen, setIsOpen] = useState(false);
+function MetricsGrid() {
+  const [metrics, setMetrics] = useState<Record<string, RegionMetrics>>({});
+  const regions = ["MY", "SG", "HK", "TW"];
 
-  useEffect(() => {
-    const stream = new EventSource("/api/sse/agent-log");
-    stream.onmessage = (event) => {
-      try {
-        const log = JSON.parse(event.data) as AgentLogEntry;
-        if (!log.node) return;
-        setActivities((prev) => [log, ...prev].slice(0, 50));
-      } catch {
-        /* ignore */
-      }
-    };
-    return () => stream.close();
-  }, []);
-
-  if (!isOpen) {
-    return (
-      <button
-        type="button"
-        onClick={() => setIsOpen(true)}
-        className="fixed bottom-6 right-6 rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white shadow-lg hover:bg-blue-500"
-      >
-        Agent log ({activities.length})
-      </button>
-    );
-  }
+  const { connected } = useSSE<RegionMetrics>({
+    url: "/api/sse/metrics",
+    onMessage: (m) => setMetrics((prev) => ({ ...prev, [m.region]: m })),
+  });
 
   return (
-    <motion.div
-      initial={{ opacity: 0, x: 400 }}
-      animate={{ opacity: 1, x: 0 }}
-      className="fixed bottom-6 right-6 flex max-h-96 w-96 flex-col overflow-hidden rounded-lg border border-slate-700 bg-slate-900 shadow-2xl"
-    >
-      <div className="flex items-center justify-between bg-blue-700 px-4 py-3">
-        <h3 className="font-semibold text-white">Agent activity</h3>
-        <button type="button" onClick={() => setIsOpen(false)} className="text-white">
-          ✕
-        </button>
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">
+          Regional Operations
+        </h2>
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          {connected ? (
+            <Wifi className="h-3 w-3 text-emerald-400" />
+          ) : (
+            <WifiOff className="h-3 w-3" />
+          )}
+          {connected ? "Live" : "Connecting…"}
+        </div>
       </div>
-      <div className="max-h-80 space-y-2 overflow-y-auto p-3 font-mono text-xs">
-        {activities.length === 0 ? (
-          <p className="text-slate-500">Run a command to see agent hops…</p>
-        ) : (
-          activities.map((log, index) => (
-            <motion.div
-              key={`${log.timestamp}-${index}`}
-              initial={{ opacity: 0, x: -8 }}
-              animate={{ opacity: 1, x: 0 }}
-              className="rounded border border-slate-700 bg-slate-950 p-2 text-slate-300"
-            >
-              [{new Date(log.timestamp).toLocaleTimeString()}] {log.node} → {log.message}
-            </motion.div>
-          ))
-        )}
-      </div>
-    </motion.div>
+      <motion.div
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.1 }}
+        className="grid grid-cols-2 gap-3 lg:grid-cols-4"
+      >
+        {regions.map((r) => (
+          <MetricCard key={r} region={r} data={metrics[r]} />
+        ))}
+      </motion.div>
+    </div>
   );
 }
 
+/* ─── Agent Activity Log ─────────────────────────────────────────────────── */
+
+function AgentActivityLog() {
+  const [entries, setEntries] = useState<AgentLogEntry[]>([]);
+  const [open, setOpen] = useState(false);
+
+  useSSE<AgentLogEntry>({
+    url: "/api/sse/agent-log",
+    onMessage: (log) => {
+      if (!log.node) return;
+      setEntries((prev) => [log, ...prev].slice(0, 50));
+    },
+  });
+
+  const count = entries.length;
+
+  return (
+    <>
+      <motion.button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        whileHover={{ scale: 1.03 }}
+        whileTap={{ scale: 0.97 }}
+        className="fixed bottom-6 right-6 flex items-center gap-2 rounded-full bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-lg"
+      >
+        <Activity className="h-4 w-4" />
+        Agent log
+        {count > 0 && (
+          <span className="rounded-full bg-white/20 px-1.5 py-0.5 text-xs leading-none">
+            {count}
+          </span>
+        )}
+      </motion.button>
+
+      <AnimatePresence>
+        {open && (
+          <motion.div
+            initial={{ opacity: 0, x: 320, scale: 0.95 }}
+            animate={{ opacity: 1, x: 0, scale: 1 }}
+            exit={{ opacity: 0, x: 320, scale: 0.95 }}
+            transition={{ type: "spring", stiffness: 300, damping: 30 }}
+            className="fixed bottom-16 right-6 flex max-h-[420px] w-96 flex-col overflow-hidden rounded-xl border border-border bg-card shadow-2xl"
+          >
+            <div className="flex items-center justify-between bg-primary/10 px-4 py-3">
+              <div className="flex items-center gap-2">
+                <Activity className="h-4 w-4 text-primary" />
+                <h3 className="text-sm font-semibold">Agent Activity</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="rounded p-1 text-muted-foreground hover:text-foreground"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-3 space-y-1.5 font-mono text-xs">
+              {entries.length === 0 ? (
+                <p className="py-4 text-center text-muted-foreground">
+                  Run a command to see agent hops…
+                </p>
+              ) : (
+                <AnimatePresence initial={false}>
+                  {entries.map((log, i) => (
+                    <motion.div
+                      key={`${log.timestamp}-${i}`}
+                      initial={{ opacity: 0, y: -6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="rounded border border-border bg-background p-2 text-foreground/80"
+                    >
+                      <span className="text-muted-foreground">
+                        [{new Date(log.timestamp).toLocaleTimeString()}]
+                      </span>{" "}
+                      <span className="text-primary">{log.node}</span>
+                      <ChevronRight className="inline h-3 w-3 text-muted-foreground" />
+                      {log.message}
+                    </motion.div>
+                  ))}
+                </AnimatePresence>
+              )}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </>
+  );
+}
+
+/* ─── Main Dashboard ─────────────────────────────────────────────────────── */
+
 export function ControlTowerDashboard() {
+  const [result, setResult] = useState<OrchestrationResult | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  function handleResult(r: OrchestrationResult | null, isLoading: boolean) {
+    setResult(r);
+    setLoading(isLoading);
+  }
+
+  const showAction = loading || result !== null;
+  const showHitl =
+    result?.decision?.requires_approval && result?.slack_message_ts && !loading;
+
   return (
     <div className="mx-auto max-w-7xl space-y-6 p-6">
-      <header className="space-y-1">
-        <h1 className="text-3xl font-bold text-slate-50">NexusFlow Control Tower</h1>
-        <p className="text-slate-400">
-          LangGraph orchestration · SSE metrics · HITL · audit trail
+      <motion.header
+        initial={{ opacity: 0, y: -12 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="space-y-1"
+      >
+        <h1 className="text-3xl font-bold tracking-tight">NexusOps Control Tower</h1>
+        <p className="text-muted-foreground">
+          LangGraph orchestration · SSE real-time metrics · HITL approval · audit trail
         </p>
-      </header>
-      <NLCommandBar />
-      <MetricsGrid />
+      </motion.header>
+
+      <NLCommandBar onResult={handleResult} />
+
+      <div className="grid gap-6 lg:grid-cols-3">
+        {/* Left column: metrics + alerts */}
+        <div className="space-y-6 lg:col-span-2">
+          <MetricsGrid />
+          <AlertList />
+        </div>
+
+        {/* Right column: action details + HITL */}
+        <div className="space-y-4">
+          <AnimatePresence>
+            {showAction && (
+              <motion.div
+                key="action"
+                initial={{ opacity: 0, x: 16 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: 16 }}
+              >
+                <ActionDetails result={result!} isLoading={loading} />
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          <AnimatePresence>
+            {showHitl && result!.decision && (
+              <motion.div
+                key="hitl"
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                transition={{ delay: 0.15 }}
+              >
+                <ConfirmationPanel
+                  decisionId={result!.slack_message_ts!}
+                  action={result!.decision!.target_action}
+                  reasoning={result!.decision!.reasoning}
+                  estimatedImpact={result!.decision!.estimated_impact}
+                  requiresApproval={result!.decision!.requires_approval}
+                  onResolved={(choice) => {
+                    setResult((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            execution_status: choice === "approve" ? "completed" : "rejected",
+                          }
+                        : prev,
+                    );
+                  }}
+                />
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {!showAction && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+            >
+              <Card>
+                <CardContent className="flex h-48 flex-col items-center justify-center gap-3 text-center">
+                  <Command className="h-8 w-8 text-muted-foreground/40" />
+                  <div>
+                    <p className="text-sm font-medium text-muted-foreground">
+                      No active action
+                    </p>
+                    <p className="text-xs text-muted-foreground/60">
+                      Run a command to see details here
+                    </p>
+                  </div>
+                </CardContent>
+              </Card>
+            </motion.div>
+          )}
+        </div>
+      </div>
+
       <AgentActivityLog />
     </div>
   );

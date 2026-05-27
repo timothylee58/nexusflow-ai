@@ -2,18 +2,18 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "NexusFlow",
-  description: "Multi-agent operations dashboard",
+  title: "NexusFlow — Control Tower",
+  description: "Multi-agent autonomous operations dashboard · MY / SG / HK / TW",
 };
 
 export default function RootLayout({
   children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+}: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en">
-      <body className="min-h-screen antialiased">{children}</body>
+    <html lang="en" className="dark">
+      <body className="min-h-screen bg-background text-foreground antialiased">
+        {children}
+      </body>
     </html>
   );
 }
