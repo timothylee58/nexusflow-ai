@@ -59,6 +59,8 @@ services:
       dockerfile: Dockerfile
     env_file:
       - ./workers/slack-bot/.env.docker
+    environment:
+      NEXUSFLOW_API_URL: http://backend:8000
     depends_on:
       - redis
       - backend

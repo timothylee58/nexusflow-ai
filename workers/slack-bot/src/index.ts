@@ -187,6 +187,71 @@ async function main() {
     }
   });
 
+  // ── HITL button actions (Socket Mode path) ───────────────────────────────
+  // In HTTP mode these are handled by the FastAPI /slack/interactions endpoint.
+  // In Socket Mode, Slack delivers interactions here via the WebSocket tunnel.
+
+  async function handleHitlAction(
+    actionId: "hitl_approve" | "hitl_reject",
+    buttonValue: string,
+    userId: string,
+    userName: string,
+    ack: () => Promise<void>,
+    respond: (msg: object) => Promise<void>,
+  ) {
+    await ack();
+    const choice = actionId === "hitl_approve" ? "approve" : "reject";
+    const verb = choice === "approve" ? "approved" : "rejected";
+
+    try {
+      const result = (await apiPost("/agent/hitl/approve", {
+        decision_id: buttonValue,
+        approval_choice: choice,
+        user_id: userName || userId,
+        notes: `${verb.charAt(0).toUpperCase() + verb.slice(1)} via Slack (Socket Mode) by ${userName || userId}`,
+      })) as Record<string, unknown>;
+
+      const icon = choice === "approve" ? "✅" : "❌";
+      await respond({
+        replace_original: true,
+        text: `${icon} *${verb.charAt(0).toUpperCase() + verb.slice(1)}* by <@${userId}> — status: \`${result.status}\``,
+      });
+    } catch (e) {
+      await respond({
+        replace_original: false,
+        text: `❌ HITL action failed: ${e}`,
+      });
+    }
+  }
+
+  app.action<BlockAction<ButtonAction>>(
+    "hitl_approve",
+    async ({ action, body, ack, respond }) => {
+      await handleHitlAction(
+        "hitl_approve",
+        action.value ?? "",
+        body.user.id,
+        body.user.username ?? body.user.name ?? body.user.id,
+        ack,
+        respond,
+      );
+    },
+  );
+
+  app.action<BlockAction<ButtonAction>>(
+    "hitl_reject",
+    async ({ action, body, ack, respond }) => {
+      await handleHitlAction(
+        "hitl_reject",
+        action.value ?? "",
+        body.user.id,
+        body.user.username ?? body.user.name ?? body.user.id,
+        ack,
+        respond,
+      );
+    },
+  );
+
   // ── Direct message echo ───────────────────────────────────────────────────
 
   app.message(async ({ message, say }) => {

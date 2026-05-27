@@ -30,6 +30,7 @@ from src.db.models import AgentAction
 from src.db.session import AsyncSessionLocal
 from src.services.audit_service import write_audit_log
 from src.services.redis_service import AGENT_LOG_CHANNEL, redis_service
+from src.services.slack_service import update_hitl_message
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +84,6 @@ async def _handle_hitl_action(
     response_url: str,
 ) -> None:
     """Resolve the HITL action, update DB, Slack message, and broadcast via SSE."""
-    from src.services.slack_service import update_hitl_message
-
     choice = "approve" if slack_action == "hitl_approve" else "reject"
 
     async with AsyncSessionLocal() as session:
@@ -119,13 +118,14 @@ async def _handle_hitl_action(
 
         await session.commit()
 
+        verb = "approved" if choice == "approve" else "rejected"
         await write_audit_log(
             session,
             event_type=f"hitl_{choice}",
             user_id=user_name,
             user_input=action.user_input,
             approval_choice=choice,
-            notes=f"Approved via Slack by {user_name}",
+            notes=f"Action {verb} via Slack by {user_name}",
             payload={
                 "action_id": action.id,
                 "slack_message_ts": action.slack_message_ts,
@@ -142,7 +142,7 @@ async def _handle_hitl_action(
         pass
 
     if action.slack_message_ts:
-        await update_hitl_message(
+        await update_hitl_message(  # noqa: module-level import above
             message_ts=action.slack_message_ts,
             choice=choice,
             decided_by=user_name,

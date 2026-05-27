@@ -14,6 +14,7 @@ from src.db.models import AgentAction
 from src.db.session import AsyncSessionLocal
 from src.services.audit_service import write_audit_log
 from src.services.redis_service import AGENT_LOG_CHANNEL, redis_service
+from src.services.slack_service import post_timeout_notice, update_hitl_message
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +23,6 @@ _POLL_INTERVAL = 60  # seconds between sweeps
 
 async def _expire_action(session: AsyncSession, action: AgentAction) -> None:
     """Mark a single action as timed-out, write audit log, update Slack."""
-    from src.services.slack_service import post_timeout_notice, update_hitl_message
-
     target_action = "unknown"
     if action.decision:
         try:

@@ -99,8 +99,8 @@ async def orchestrate_query(
             await session.refresh(action)
             action_id = action.id
 
-            # If Slack is live, re-post the HITL message with the real DB action_id as button value
-            if result.get("execution_status") == "escalated" and result.get("slack_message_ts"):
+            # Post to Slack with the authoritative DB action_id as button value
+            if result.get("execution_status") == "escalated":
                 try:
                     from src.services.slack_service import post_hitl_alert as _post
                     real_ts, _ = await _post(
@@ -113,8 +113,17 @@ async def orchestrate_query(
                     )
                     action.slack_message_ts = real_ts
                     await session.commit()
+                    await redis_service.publish(
+                        AGENT_LOG_CHANNEL,
+                        {
+                            "node": "dispatch",
+                            "message": f"HITL alert posted to Slack (ts={real_ts})",
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "user_id": request.user_id,
+                        },
+                    )
                 except Exception as _exc:
-                    logger.warning("[Orchestrate] Re-post with real action_id failed: %s", _exc)
+                    logger.warning("[Orchestrate] Slack HITL post failed: %s", _exc)
 
             await write_audit_log(
                 session,
