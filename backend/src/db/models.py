@@ -21,6 +21,8 @@ class AgentAction(Base):
     execution_status: Mapped[str] = mapped_column(String(32), default="pending")
     execution_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     slack_message_ts: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # HITL expiry — set when action is escalated to Slack
+    hitl_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

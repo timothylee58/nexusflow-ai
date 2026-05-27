@@ -1,10 +1,12 @@
 from contextlib import asynccontextmanager
+import asyncio
 import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.routes.orchestration import agent_router, audit_router, sse_router
+from src.api.routes.slack_interactions import slack_router
 from src.config import settings
 from src.services.llm_provider import is_llm_enabled, resolve_llm_provider
 from src.db.session import init_db
@@ -17,13 +19,24 @@ logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.I
 async def lifespan(_: FastAPI):
     await init_db()
     await redis_service.connect()
+
+    # Start HITL expiry sweep in the background
+    from src.services.hitl_timeout import run_hitl_timeout_loop
+    timeout_task = asyncio.create_task(run_hitl_timeout_loop())
+
     yield
+
+    timeout_task.cancel()
+    try:
+        await timeout_task
+    except asyncio.CancelledError:
+        pass
     await redis_service.close()
 
 
 app = FastAPI(
     title="NexusFlow API",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -41,6 +54,7 @@ app.add_middleware(
 app.include_router(agent_router)
 app.include_router(sse_router)
 app.include_router(audit_router)
+app.include_router(slack_router)
 
 
 @app.get("/health")
@@ -58,6 +72,8 @@ def status() -> dict[str, str | bool | None]:
         "llm_provider": resolve_llm_provider(),
         "llm_configured": is_llm_enabled(),
         "database_url": settings.database_url or "sqlite (local default)",
+        "slack_configured": bool(settings.slack_bot_token and settings.slack_channel_id),
+        "hitl_timeout_minutes": settings.hitl_timeout_minutes,
     }
 
 

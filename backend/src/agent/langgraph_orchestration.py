@@ -318,7 +318,10 @@ async def dispatch_node(state: DispatcherState) -> dict:
 
     if decision["requires_approval"]:
         execution_status = "escalated"
-        slack_message_ts = await post_hitl_alert(
+        from uuid import uuid4
+        action_id = str(uuid4())  # temporary ID; the caller replaces with DB-persisted ID
+        slack_message_ts, _expires = await post_hitl_alert(
+            action_id=action_id,
             user_input=state.get("user_input", ""),
             severity=analysis["severity"] if analysis else "medium",
             summary=analysis["summary"] if analysis else "",

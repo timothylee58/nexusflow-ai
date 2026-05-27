@@ -13,6 +13,8 @@ database_url = settings.database_url or f"sqlite+aiosqlite:///{DATA_DIR / 'nexus
 
 engine = create_async_engine(database_url, echo=False)
 SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+# Alias used by background tasks (e.g. HITL timeout sweeper) that need their own sessions
+AsyncSessionLocal = SessionLocal
 
 
 async def init_db() -> None:

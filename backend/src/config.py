@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     slack_signing_secret: str | None = None
     slack_app_id: str | None = None
     slack_channel_id: str | None = None
+    # HITL decision window — auto-expires after this many minutes
+    hitl_timeout_minutes: int = 30
 
 
 @lru_cache
