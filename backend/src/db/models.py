@@ -9,6 +9,19 @@ class Base(DeclarativeBase):
     pass
 
 
+class SlackUser(Base):
+    """Registered Slack users allowed to interact with NexusFlow."""
+
+    __tablename__ = "slack_users"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    slack_user_id: Mapped[str] = mapped_column(String(32), nullable=False, unique=True)
+    slack_username: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)  # "admin" | "analyst"
+    added_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class AgentAction(Base):
     __tablename__ = "agent_actions"
 

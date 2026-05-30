@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     slack_signing_secret: str | None = None
     slack_app_id: str | None = None
     slack_channel_id: str | None = None
+    # Comma-separated Slack user IDs bootstrapped as admins (no DB entry needed)
+    # e.g. SLACK_ADMIN_USER_IDS=U012ABC,U034DEF
+    slack_admin_user_ids: str = ""
     # HITL decision window — auto-expires after this many minutes
     hitl_timeout_minutes: int = 30
 
