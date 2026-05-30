@@ -87,10 +87,43 @@ async def orchestrate_query(
                 execution_path=json.dumps(result.get("execution_path", [])),
                 slack_message_ts=result.get("slack_message_ts") or None,
             )
+
+            # Persist HITL expiry if the action was escalated to Slack
+            if result.get("execution_status") == "escalated" and result.get("decision", {}).get("requires_approval"):
+                from datetime import timedelta
+                from src.config import settings as _s
+                action.hitl_expires_at = datetime.utcnow() + timedelta(minutes=_s.hitl_timeout_minutes)
+
             session.add(action)
             await session.commit()
             await session.refresh(action)
             action_id = action.id
+
+            # Post to Slack with the authoritative DB action_id as button value
+            if result.get("execution_status") == "escalated":
+                try:
+                    from src.services.slack_service import post_hitl_alert as _post
+                    real_ts, _ = await _post(
+                        action_id=action_id,
+                        user_input=request.query,
+                        severity=result["analysis"]["severity"] if result.get("analysis") else "medium",
+                        summary=result["analysis"]["summary"] if result.get("analysis") else "",
+                        target_action=result["decision"]["target_action"],
+                        estimated_impact=result["decision"]["estimated_impact"],
+                    )
+                    action.slack_message_ts = real_ts
+                    await session.commit()
+                    await redis_service.publish(
+                        AGENT_LOG_CHANNEL,
+                        {
+                            "node": "dispatch",
+                            "message": f"HITL alert posted to Slack (ts={real_ts})",
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "user_id": request.user_id,
+                        },
+                    )
+                except Exception as _exc:
+                    logger.warning("[Orchestrate] Slack HITL post failed: %s", _exc)
 
             await write_audit_log(
                 session,
@@ -165,6 +198,23 @@ async def approve_decision(
             "user_id": body.user_id,
         },
     )
+
+    # Mirror resolution to Slack if a message was posted
+    if action.slack_message_ts:
+        try:
+            from src.services.slack_service import update_hitl_message
+            target_action = "action"
+            if action.decision:
+                target_action = json.loads(action.decision).get("target_action", "action")
+            await update_hitl_message(
+                message_ts=action.slack_message_ts,
+                choice=body.approval_choice,
+                decided_by=body.user_id,
+                target_action=target_action,
+                notes=body.notes,
+            )
+        except Exception as _exc:
+            logger.warning("[HITL approve] Slack update failed: %s", _exc)
 
     await session.commit()
     return {

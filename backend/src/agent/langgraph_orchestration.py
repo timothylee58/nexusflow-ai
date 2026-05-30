@@ -296,8 +296,6 @@ async def decide_node(state: DispatcherState) -> dict:
 
 
 async def dispatch_node(state: DispatcherState) -> dict:
-    from src.services.slack_service import post_hitl_alert
-
     decision = state.get("decision")
     analysis = state.get("analysis")
     user_id = state.get("user_id", "anonymous")
@@ -313,19 +311,13 @@ async def dispatch_node(state: DispatcherState) -> dict:
 
     await _publish_node_event("dispatch", decision["target_action"], user_id)
 
-    slack_message_ts = ""
     execution_status = "completed"
 
     if decision["requires_approval"]:
+        # Mark as escalated; the API route posts to Slack after DB persist
+        # so the button value carries the real AgentAction.id.
         execution_status = "escalated"
-        slack_message_ts = await post_hitl_alert(
-            user_input=state.get("user_input", ""),
-            severity=analysis["severity"] if analysis else "medium",
-            summary=analysis["summary"] if analysis else "",
-            target_action=decision["target_action"],
-            estimated_impact=decision["estimated_impact"],
-        )
-        await _publish_node_event("dispatch", "Escalated to HITL / Slack", user_id)
+        await _publish_node_event("dispatch", "Escalated to HITL — awaiting approval", user_id)
     else:
         logger.info("[Dispatcher] Auto-executed: %s", decision["target_action"])
         await _publish_node_event("dispatch", f"Auto-executed {decision['target_action']}", user_id)
@@ -333,7 +325,7 @@ async def dispatch_node(state: DispatcherState) -> dict:
     execution_path.append("dispatch")
     return {
         "execution_status": execution_status,
-        "slack_message_ts": slack_message_ts,
+        "slack_message_ts": "",
         "execution_path": execution_path,
     }
 

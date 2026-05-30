@@ -12,6 +12,7 @@ const nextConfig: NextConfig = {
       { source: "/api/agent/:path*", destination: `${apiBase}/agent/:path*` },
       { source: "/api/audit/:path*", destination: `${apiBase}/audit/:path*` },
       { source: "/api/sse/:path*", destination: `${apiBase}/sse/:path*` },
+      { source: "/api/status", destination: `${apiBase}/status` },
     ];
   },
 };
