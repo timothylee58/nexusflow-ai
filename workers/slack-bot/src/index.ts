@@ -17,9 +17,74 @@ async function apiPost(path: string, body: unknown): Promise<unknown> {
   return res.json();
 }
 
+async function apiGet(path: string): Promise<unknown> {
+  const res = await fetch(`${apiBase}${path}`);
+  if (!res.ok) throw new Error(`API ${path} → ${res.status}: ${await res.text()}`);
+  return res.json();
+}
+
+async function apiDelete(path: string, body: unknown): Promise<unknown> {
+  const res = await fetch(`${apiBase}${path}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`API ${path} → ${res.status}: ${await res.text()}`);
+  return res.json();
+}
+
+// ─── RBAC ────────────────────────────────────────────────────────────────────
+
+type UserRole = "admin" | "analyst" | null;
+
+interface RoleCheck {
+  slack_user_id: string;
+  role: UserRole;
+  source: "bootstrap" | "db" | null;
+  slack_username?: string;
+}
+
+async function getUserRole(userId: string): Promise<RoleCheck> {
+  const data = (await apiGet(
+    `/slack/users/check?slack_user_id=${encodeURIComponent(userId)}`,
+  )) as RoleCheck;
+  return data;
+}
+
+/**
+ * Return true when the user holds at least one of the required roles.
+ * On API errors, defaults to deny.
+ */
+async function isAuthorized(userId: string, requiredRoles: UserRole[]): Promise<boolean> {
+  try {
+    const { role } = await getUserRole(userId);
+    return role !== null && requiredRoles.includes(role);
+  } catch {
+    return false;
+  }
+}
+
+function unauthorizedBlocks(requiredRole: string): object[] {
+  return [
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `🔒 *Access denied.* This action requires the *${requiredRole}* role.\nAsk an admin to run \`/nexus users add @you ${requiredRole}\`.`,
+      },
+    },
+  ];
+}
+
 // ─── Block Kit builders ───────────────────────────────────────────────────────
 
-function helpBlocks(): object[] {
+function helpBlocks(isAdmin: boolean): object[] {
+  const adminSection = isAdmin
+    ? "\n\n*Admin commands:*\n" +
+      "• `/nexus users` — List registered users\n" +
+      "• `/nexus users add @user [admin|analyst]` — Grant access\n" +
+      "• `/nexus users remove @user` — Revoke access"
+    : "";
   return [
     {
       type: "header",
@@ -33,8 +98,10 @@ function helpBlocks(): object[] {
           "*Available commands:*\n" +
           "• `/nexus <query>` — Submit a natural language ops query\n" +
           "  _Example: `/nexus Show KL bottlenecks right now`_\n" +
-          "• `/nexus status` — Check system status\n\n" +
-          "*HITL approvals* arrive as interactive messages. Use the *Approve* or *Reject* buttons directly in Slack.",
+          "• `/nexus status` — Check system status\n" +
+          "• `/nexus whoami` — Show your role\n" +
+          "*HITL approvals* arrive as interactive messages. Use the *Approve* or *Reject* buttons directly in Slack." +
+          adminSection,
       },
     },
   ];
@@ -121,6 +188,36 @@ function orchestrationResultBlocks(result: Record<string, unknown>): object[] {
   return blocks;
 }
 
+interface UserRecord {
+  id: string;
+  slack_user_id: string;
+  slack_username: string | null;
+  role: string;
+  added_by: string | null;
+  created_at: string;
+}
+
+function usersListBlocks(users: UserRecord[]): object[] {
+  if (users.length === 0) {
+    return [
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: "_No registered users yet._" },
+      },
+    ];
+  }
+  const rows = users
+    .map((u) => {
+      const name = u.slack_username ? `@${u.slack_username}` : u.slack_user_id;
+      return `• ${name} — \`${u.role}\``;
+    })
+    .join("\n");
+  return [
+    { type: "header", text: { type: "plain_text", text: "👥 Registered Users" } },
+    { type: "section", text: { type: "mrkdwn", text: rows } },
+  ];
+}
+
 // ─── Bolt app ─────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -143,14 +240,99 @@ async function main() {
 
   app.command("/nexus", async ({ command, ack, respond }) => {
     await ack();
-    const text = command.text?.trim();
+    const userId = command.user_id;
+    const text = command.text?.trim() ?? "";
 
+    // ── whoami ────────────────────────────────────────────────────────────
+    if (text === "whoami") {
+      try {
+        const info = await getUserRole(userId);
+        const role = info.role ?? "none (not registered)";
+        const src = info.source ? ` _(${info.source})_` : "";
+        await respond({
+          text: `🪪 You are <@${userId}>. Role: *${role}*${src}`,
+          response_type: "ephemeral",
+        });
+      } catch (e) {
+        await respond({ text: `❌ Could not reach API: ${e}`, response_type: "ephemeral" });
+      }
+      return;
+    }
+
+    // ── users list ────────────────────────────────────────────────────────
+    if (text === "users") {
+      if (!(await isAuthorized(userId, ["admin"]))) {
+        await respond({ blocks: unauthorizedBlocks("admin"), response_type: "ephemeral" });
+        return;
+      }
+      try {
+        const users = (await apiGet(
+          `/slack/users?caller_id=${encodeURIComponent(userId)}`,
+        )) as UserRecord[];
+        await respond({ blocks: usersListBlocks(users), response_type: "ephemeral" });
+      } catch (e) {
+        await respond({ text: `❌ Failed to list users: ${e}`, response_type: "ephemeral" });
+      }
+      return;
+    }
+
+    // ── users add @mention role ───────────────────────────────────────────
+    const addMatch = text.match(/^users\s+add\s+<@([A-Z0-9]+)(?:\|[^>]+)?>\s*(admin|analyst)?$/i);
+    if (addMatch) {
+      if (!(await isAuthorized(userId, ["admin"]))) {
+        await respond({ blocks: unauthorizedBlocks("admin"), response_type: "ephemeral" });
+        return;
+      }
+      const targetId = addMatch[1];
+      const role = (addMatch[2]?.toLowerCase() ?? "analyst") as "admin" | "analyst";
+      try {
+        await apiPost("/slack/users", {
+          slack_user_id: targetId,
+          role,
+          caller_id: userId,
+        });
+        await respond({
+          text: `✅ <@${targetId}> registered as *${role}*.`,
+          response_type: "ephemeral",
+        });
+      } catch (e) {
+        await respond({ text: `❌ Failed to add user: ${e}`, response_type: "ephemeral" });
+      }
+      return;
+    }
+
+    // ── users remove @mention ─────────────────────────────────────────────
+    const removeMatch = text.match(/^users\s+remove\s+<@([A-Z0-9]+)(?:\|[^>]+)?>/i);
+    if (removeMatch) {
+      if (!(await isAuthorized(userId, ["admin"]))) {
+        await respond({ blocks: unauthorizedBlocks("admin"), response_type: "ephemeral" });
+        return;
+      }
+      const targetId = removeMatch[1];
+      try {
+        await apiDelete(`/slack/users/${encodeURIComponent(targetId)}`, { caller_id: userId });
+        await respond({
+          text: `✅ <@${targetId}> removed from the registry.`,
+          response_type: "ephemeral",
+        });
+      } catch (e) {
+        await respond({ text: `❌ Failed to remove user: ${e}`, response_type: "ephemeral" });
+      }
+      return;
+    }
+
+    // ── help / status (open to registered users) ──────────────────────────
     if (!text || text === "help") {
-      await respond({ blocks: helpBlocks(), response_type: "ephemeral" });
+      const roleInfo = await getUserRole(userId).catch(() => ({ role: null }));
+      await respond({
+        blocks: helpBlocks(roleInfo.role === "admin"),
+        response_type: "ephemeral",
+      });
       return;
     }
 
     if (text === "status") {
+      // status is intentionally open (read-only, non-sensitive)
       try {
         const res = await fetch(`${apiBase}/status`);
         const data = (await res.json()) as Record<string, unknown>;
@@ -161,7 +343,12 @@ async function main() {
       return;
     }
 
-    // Submit orchestration query
+    // ── natural language query — requires analyst or admin ────────────────
+    if (!(await isAuthorized(userId, ["admin", "analyst"]))) {
+      await respond({ blocks: unauthorizedBlocks("analyst"), response_type: "ephemeral" });
+      return;
+    }
+
     await respond({
       text: `⏳ Processing: _${text}_`,
       response_type: "in_channel",
@@ -200,6 +387,16 @@ async function main() {
     respond: (msg: object) => Promise<void>,
   ) {
     await ack();
+
+    // HITL decisions are admin-only
+    if (!(await isAuthorized(userId, ["admin"]))) {
+      await respond({
+        replace_original: false,
+        text: "🔒 *Access denied.* Only admins can approve or reject HITL decisions.",
+      });
+      return;
+    }
+
     const choice = actionId === "hitl_approve" ? "approve" : "reject";
     const verb = choice === "approve" ? "approved" : "rejected";
 

@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.routes.orchestration import agent_router, audit_router, sse_router
 from src.api.routes.slack_interactions import slack_router
+from src.api.routes.slack_users import slack_users_router
 from src.config import settings
 from src.services.llm_provider import is_llm_enabled, resolve_llm_provider
 from src.db.session import init_db
@@ -55,6 +56,7 @@ app.include_router(agent_router)
 app.include_router(sse_router)
 app.include_router(audit_router)
 app.include_router(slack_router)
+app.include_router(slack_users_router)
 
 
 @app.get("/health")
