@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.langgraph_orchestration import execute_orchestration
+from src.api.deps import require_api_key
 from src.db.models import AgentAction, AuditLog
 from src.db.session import get_session
 from src.services.audit_service import write_audit_log
@@ -24,9 +25,11 @@ from src.services.redis_service import AGENT_LOG_CHANNEL, redis_service
 
 logger = logging.getLogger(__name__)
 
-agent_router = APIRouter(prefix="/agent", tags=["agent"])
-sse_router = APIRouter(prefix="/sse", tags=["sse"])
-audit_router = APIRouter(prefix="/audit", tags=["audit"])
+_auth = [Depends(require_api_key)]
+
+agent_router = APIRouter(prefix="/agent", tags=["agent"], dependencies=_auth)
+sse_router = APIRouter(prefix="/sse", tags=["sse"], dependencies=_auth)
+audit_router = APIRouter(prefix="/audit", tags=["audit"], dependencies=_auth)
 
 
 class QueryRequest(BaseModel):

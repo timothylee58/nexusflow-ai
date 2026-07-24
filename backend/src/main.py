@@ -5,6 +5,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from src.api.deps import RateLimitMiddleware, SecurityHeadersMiddleware
 from src.api.routes.orchestration import agent_router, audit_router, sse_router
 from src.api.routes.slack_interactions import slack_router
 from src.api.routes.slack_users import slack_users_router
@@ -41,12 +42,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=[o.strip() for o in settings.allowed_origins.split(",") if o.strip()],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -49,6 +49,21 @@ class Settings(BaseSettings):
     # HITL decision window — auto-expires after this many minutes
     hitl_timeout_minutes: int = 30
 
+    # ── Security ──────────────────────────────────────────────────────────────
+    # Bearer token required on /agent/* and /audit/* routes.
+    # Unset in development = unauthenticated access allowed.
+    # In production this MUST be set — the server returns 500 if it is not.
+    api_key: str | None = None
+
+    # Comma-separated list of allowed CORS origins.
+    # e.g. ALLOWED_ORIGINS=https://app.nexusflow.ai,https://www.nexusflow.ai
+    allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+
+    # Rate limiting — requests per IP per minute.
+    # rate_limit_orchestrate_per_minute applies only to /agent/orchestrate (LLM calls).
+    rate_limit_per_minute: int = 60
+    rate_limit_orchestrate_per_minute: int = 10
+
 
 @lru_cache
 def get_settings() -> Settings:
