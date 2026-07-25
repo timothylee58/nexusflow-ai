@@ -81,3 +81,65 @@ variable "redis_url" {
   sensitive   = true
   default     = ""
 }
+
+# ── ECS / compute ──────────────────────────────────────────────────────────────
+
+variable "ecs_cluster_arn" {
+  description = "ARN of the existing ECS cluster to deploy the service into"
+  type        = string
+}
+
+variable "container_image" {
+  description = "Docker image URI for the backend container (ECR or DockerHub)"
+  type        = string
+}
+
+variable "ecs_task_execution_role_arn" {
+  description = "ARN of the ECS task execution role (pulls image, writes logs)"
+  type        = string
+}
+
+variable "ecs_task_role_arn" {
+  description = "ARN of the ECS task role (app-level AWS calls: SSM, S3, …)"
+  type        = string
+}
+
+variable "private_subnet_ids" {
+  description = "Private subnet IDs the ECS tasks run in (typically 2-AZ)"
+  type        = list(string)
+}
+
+variable "backend_security_group_id" {
+  description = "Security group allowing ALB → ECS on port 8000"
+  type        = string
+}
+
+variable "desired_count" {
+  description = "Number of ECS task replicas to run"
+  type        = number
+  default     = 2
+}
+
+variable "container_cpu" {
+  description = "CPU units per ECS task (1024 = 1 vCPU)"
+  type        = number
+  default     = 512
+}
+
+variable "container_memory" {
+  description = "Memory (MiB) per ECS task"
+  type        = number
+  default     = 1024
+}
+
+variable "log_retention_days" {
+  description = "CloudWatch log retention in days (0 = never expire)"
+  type        = number
+  default     = 30
+}
+
+variable "otel_exporter_otlp_endpoint" {
+  description = "OTLP HTTP endpoint for distributed tracing (ADOT / Grafana Tempo). Leave empty to disable."
+  type        = string
+  default     = ""
+}
