@@ -17,8 +17,10 @@ class SlackUser(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     slack_user_id: Mapped[str] = mapped_column(String(32), nullable=False, unique=True)
     slack_username: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    role: Mapped[str] = mapped_column(String(16), nullable=False)  # "admin" | "analyst"
+    # Roles: "admin" | "operator" | "analyst" | "viewer"
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
     added_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    org_id: Mapped[str] = mapped_column(String(128), nullable=False, server_default="default", default="default")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -27,6 +29,7 @@ class AgentAction(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    org_id: Mapped[str] = mapped_column(String(128), nullable=False, server_default="default", default="default")
     user_input: Mapped[str] = mapped_column(Text, nullable=False)
     parsed_command: Mapped[str | None] = mapped_column(Text, nullable=True)
     analysis: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -45,6 +48,7 @@ class AuditLog(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     event_type: Mapped[str] = mapped_column(String(64), nullable=False)
     user_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    org_id: Mapped[str] = mapped_column(String(128), nullable=False, server_default="default", default="default")
     user_input: Mapped[str | None] = mapped_column(Text, nullable=True)
     execution_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     approval_choice: Mapped[str | None] = mapped_column(String(32), nullable=True)

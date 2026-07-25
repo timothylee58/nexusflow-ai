@@ -79,6 +79,24 @@ class Settings(BaseSettings):
     redis_max_retries: int = 3
     redis_retry_interval_s: float = 1.0
 
+    # ── LLM observability (Langfuse) ──────────────────────────────────────────
+    # Set LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY to enable tracing.
+    # Traces are sent to LANGFUSE_HOST (default: Langfuse Cloud).
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: str | None = None
+    langfuse_host: str = "https://cloud.langfuse.com"
+
+    # ── Microsoft Teams HITL ──────────────────────────────────────────────────
+    # Incoming webhook URL for the Teams channel that receives HITL alerts.
+    # When set, HITL alerts are posted to Teams in addition to (or instead of) Slack.
+    teams_hitl_webhook_url: str | None = None
+
+    # ── Multi-tenancy ─────────────────────────────────────────────────────────
+    # HTTP header used to identify the tenant/organisation.
+    # Clients pass this on every request: X-Org-ID: acme
+    org_id_header: str = "X-Org-ID"
+    default_org_id: str = "default"
+
 
 @lru_cache
 def get_settings() -> Settings:

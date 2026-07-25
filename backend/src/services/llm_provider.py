@@ -1,10 +1,17 @@
-"""Multi-provider LLM gateway: anthropic | openai | ilmu | heuristic."""
+"""Multi-provider LLM gateway: anthropic | openai | ilmu | heuristic.
+
+When LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY are set, every LLM call is
+traced in Langfuse with prompt, completion, model, token usage, and latency.
+The integration is fully optional — missing keys make it a no-op.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Literal
 
 from src.config import settings
@@ -143,17 +150,73 @@ def _complete_sync(*, system: str, user: str, tier: LlmTier) -> LlmCompletion:
     raise RuntimeError("LLM called while provider is heuristic")
 
 
+@lru_cache(maxsize=1)
+def _langfuse_client():
+    """Return a Langfuse client, or None when not configured."""
+    if not (settings.langfuse_public_key and settings.langfuse_secret_key):
+        return None
+    try:
+        from langfuse import Langfuse
+        return Langfuse(
+            public_key=settings.langfuse_public_key,
+            secret_key=settings.langfuse_secret_key,
+            host=settings.langfuse_host,
+        )
+    except Exception as exc:
+        logger.warning("Langfuse init failed — tracing disabled: %s", exc)
+        return None
+
+
 async def complete_text(*, system: str, user: str, tier: LlmTier) -> LlmCompletion | None:
     if not is_llm_enabled():
         return None
 
+    provider = resolve_llm_provider()
+    model = _model_for_tier(provider, tier)
+    lf = _langfuse_client()
+    generation = None
+
+    if lf is not None:
+        try:
+            trace = lf.trace(name=f"nexusflow.{tier}", metadata={"provider": provider})
+            generation = trace.generation(
+                name=tier,
+                model=model,
+                input=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            )
+        except Exception as exc:
+            logger.debug("Langfuse trace start failed: %s", exc)
+            generation = None
+
+    start = time.monotonic()
     try:
-        return await asyncio.to_thread(
-            _complete_sync,
-            system=system,
-            user=user,
-            tier=tier,
-        )
+        result = await asyncio.to_thread(_complete_sync, system=system, user=user, tier=tier)
     except Exception as exc:
-        logger.error("LLM completion failed (%s): %s", resolve_llm_provider(), exc, exc_info=True)
+        if generation is not None:
+            try:
+                generation.end(level="ERROR", status_message=str(exc))
+                lf.flush()
+            except Exception:
+                pass
+        logger.error("LLM completion failed (%s): %s", provider, exc, exc_info=True)
         raise
+
+    latency_ms = int((time.monotonic() - start) * 1000)
+    if generation is not None and result is not None:
+        try:
+            generation.end(
+                output=result.text,
+                usage={
+                    "output": result.tokens_used,
+                    "total": result.tokens_used,
+                },
+                metadata={"latency_ms": latency_ms, "model": result.model},
+            )
+            lf.flush()
+        except Exception as exc:
+            logger.debug("Langfuse generation end failed: %s", exc)
+
+    return result

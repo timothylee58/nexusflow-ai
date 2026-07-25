@@ -143,3 +143,34 @@ variable "otel_exporter_otlp_endpoint" {
   type        = string
   default     = ""
 }
+
+# ── Auto Scaling ──────────────────────────────────────────────────────────────
+
+variable "autoscaling_min_capacity" {
+  description = "Minimum number of ECS tasks; must be ≥ 1"
+  type        = number
+  default     = 1
+}
+
+variable "autoscaling_max_capacity" {
+  description = "Maximum number of ECS tasks the auto-scaler may launch"
+  type        = number
+  default     = 10
+}
+
+variable "autoscaling_cpu_target" {
+  description = "Target average CPU utilisation (%) that triggers scale-out"
+  type        = number
+  default     = 60
+}
+
+variable "autoscaling_requests_per_target" {
+  description = "Target ALB requests-per-minute per ECS task; drives the second scaling policy"
+  type        = number
+  default     = 1000
+}
+
+variable "target_group_arn_suffix" {
+  description = "ARN suffix of the ALB target group (the short form used in CloudWatch metrics, e.g. targetgroup/nexusflow-prod/abc123)"
+  type        = string
+}
