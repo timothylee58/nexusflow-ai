@@ -42,21 +42,45 @@ class RedisService:
             logger.warning("REDIS_URL not set — using in-memory event bus for SSE")
             return
 
-        try:
-            import redis.asyncio as redis
+        import redis.asyncio as redis
 
-            self._client = redis.from_url(settings.redis_url, decode_responses=True)
-            await self._client.ping()
-            self._use_redis = True
-            logger.info("Connected to Redis for SSE pub/sub")
-        except Exception as exc:
-            logger.warning("Redis unavailable (%s) — falling back to in-memory bus", exc)
-            self._client = None
-            self._use_redis = False
+        client = redis.from_url(settings.redis_url, decode_responses=True)
+        max_retries = settings.redis_max_retries
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                await client.ping()
+                self._client = client
+                self._use_redis = True
+                logger.info("Connected to Redis (attempt %d/%d)", attempt, max_retries)
+                return
+            except Exception as exc:
+                logger.warning(
+                    "Redis connection attempt %d/%d failed: %s",
+                    attempt, max_retries, exc,
+                )
+                if attempt < max_retries:
+                    backoff = settings.redis_retry_interval_s * (2 ** (attempt - 1))
+                    await asyncio.sleep(backoff)
+
+        logger.warning(
+            "Redis unavailable after %d attempts — falling back to in-memory bus", max_retries
+        )
+        self._use_redis = False
 
     async def close(self) -> None:
         if self._client is not None:
             await self._client.close()
+
+    async def is_healthy(self) -> bool:
+        """Return True if Redis is connected and responsive."""
+        if not self._use_redis or self._client is None:
+            return False
+        try:
+            await self._client.ping()
+            return True
+        except Exception:
+            return False
 
     async def publish(self, channel: str, payload: dict[str, Any]) -> None:
         message = json.dumps(payload)

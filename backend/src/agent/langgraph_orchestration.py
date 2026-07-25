@@ -1,5 +1,9 @@
 """
 LangGraph orchestration — 5-node pipeline with heuristic fallback when no API key.
+
+Each node is wrapped in an OpenTelemetry span so end-to-end latency and
+per-node attributes (region, severity, model, decision type …) are visible
+in CloudWatch / Grafana / X-Ray alongside the structured JSON logs.
 """
 
 from __future__ import annotations
@@ -15,8 +19,11 @@ from langgraph.graph import END, StateGraph
 
 from src.services.llm_provider import complete_text, is_llm_enabled, resolve_llm_provider
 from src.services.redis_service import AGENT_LOG_CHANNEL, redis_service
+from src.telemetry import get_tracer
 
 logger = logging.getLogger(__name__)
+
+_tracer = get_tracer(__name__)
 
 
 class ParsedCommand(TypedDict):
@@ -133,81 +140,100 @@ def _extract_json(text: str) -> dict:
 
 
 async def parse_node(state: DispatcherState) -> dict:
-    user_input = state["user_input"]
-    user_id = state.get("user_id", "anonymous")
-    logger.info("[Parser] Processing: %s", user_input)
-    await _publish_node_event("parse", f"Parsing: {user_input[:80]}", user_id)
+    with _tracer.start_as_current_span("langgraph.parse") as span:
+        user_input = state["user_input"]
+        user_id = state.get("user_id", "anonymous")
+        span.set_attribute("user_id", user_id)
+        span.set_attribute("user_input.length", len(user_input))
+        span.set_attribute("llm.enabled", is_llm_enabled())
 
-    errors = list(state.get("errors") or [])
-    execution_path = list(state.get("execution_path") or [])
+        logger.info("[Parser] Processing: %s", user_input)
+        await _publish_node_event("parse", f"Parsing: {user_input[:80]}", user_id)
 
-    if is_llm_enabled():
-        try:
-            completion = await complete_text(
-                system=PARSE_SYSTEM_PROMPT,
-                user=user_input,
-                tier="parse",
-            )
-            parsed = _extract_json(completion.text if completion else "")
-            parsed_command = ParsedCommand(
-                query_type=parsed.get("query_type", "status"),
-                region=parsed.get("region", "MY"),
-                metric=parsed.get("metric", "delivery_time"),
-                time_frame=parsed.get("time_frame", "realtime"),
-                confidence=float(parsed.get("confidence", 0.8)),
-                raw_input=user_input,
-            )
-        except (json.JSONDecodeError, IndexError, KeyError, TypeError, RuntimeError):
-            errors.append(
-                f"Failed to parse via {resolve_llm_provider()}; using heuristic parser"
-            )
+        errors = list(state.get("errors") or [])
+        execution_path = list(state.get("execution_path") or [])
+
+        if is_llm_enabled():
+            try:
+                completion = await complete_text(
+                    system=PARSE_SYSTEM_PROMPT,
+                    user=user_input,
+                    tier="parse",
+                )
+                parsed = _extract_json(completion.text if completion else "")
+                parsed_command = ParsedCommand(
+                    query_type=parsed.get("query_type", "status"),
+                    region=parsed.get("region", "MY"),
+                    metric=parsed.get("metric", "delivery_time"),
+                    time_frame=parsed.get("time_frame", "realtime"),
+                    confidence=float(parsed.get("confidence", 0.8)),
+                    raw_input=user_input,
+                )
+                span.set_attribute("llm.provider", resolve_llm_provider())
+            except (json.JSONDecodeError, IndexError, KeyError, TypeError, RuntimeError):
+                errors.append(
+                    f"Failed to parse via {resolve_llm_provider()}; using heuristic parser"
+                )
+                parsed_command = _heuristic_parse(user_input)
+        else:
             parsed_command = _heuristic_parse(user_input)
-    else:
-        parsed_command = _heuristic_parse(user_input)
 
-    execution_path.append("parse")
-    return {"parsed_command": parsed_command, "errors": errors, "execution_path": execution_path}
+        span.set_attribute("parsed.query_type", parsed_command.get("query_type", ""))
+        span.set_attribute("parsed.region", parsed_command.get("region", ""))
+
+        execution_path.append("parse")
+        return {"parsed_command": parsed_command, "errors": errors, "execution_path": execution_path}
 
 
 async def fetch_node(state: DispatcherState) -> dict:
-    cmd = state["parsed_command"]
-    user_id = state.get("user_id", "anonymous")
-    if not cmd:
-        return {"errors": (state.get("errors") or []) + ["Missing parsed command"]}
+    with _tracer.start_as_current_span("langgraph.fetch") as span:
+        cmd = state["parsed_command"]
+        user_id = state.get("user_id", "anonymous")
+        span.set_attribute("user_id", user_id)
 
-    logger.info("[Fetcher] Fetching %s for %s", cmd["metric"], cmd["region"])
-    await _publish_node_event("fetch", f"Fetching {cmd['metric']} ({cmd['region']})", user_id)
+        if not cmd:
+            return {"errors": (state.get("errors") or []) + ["Missing parsed command"]}
 
-    current_value = round(random.uniform(60, 95), 1)
-    metrics_data = MetricsData(
-        region=cmd["region"],
-        metric=cmd["metric"],
-        current_value=current_value,
-        threshold=80.0,
-        trend="degrading" if current_value > 75 else "stable",
-        anomaly_detected=current_value > 80,
-        last_updated=datetime.utcnow().isoformat(),
-    )
-    execution_path = list(state.get("execution_path") or [])
-    execution_path.append("fetch")
-    return {"metrics_data": metrics_data, "execution_path": execution_path}
+        span.set_attribute("fetch.region", cmd["region"])
+        span.set_attribute("fetch.metric", cmd["metric"])
+
+        logger.info("[Fetcher] Fetching %s for %s", cmd["metric"], cmd["region"])
+        await _publish_node_event("fetch", f"Fetching {cmd['metric']} ({cmd['region']})", user_id)
+
+        current_value = round(random.uniform(60, 95), 1)
+        span.set_attribute("fetch.current_value", current_value)
+
+        metrics_data = MetricsData(
+            region=cmd["region"],
+            metric=cmd["metric"],
+            current_value=current_value,
+            threshold=80.0,
+            trend="degrading" if current_value > 75 else "stable",
+            anomaly_detected=current_value > 80,
+            last_updated=datetime.utcnow().isoformat(),
+        )
+        execution_path = list(state.get("execution_path") or [])
+        execution_path.append("fetch")
+        return {"metrics_data": metrics_data, "execution_path": execution_path}
 
 
 async def analyze_node(state: DispatcherState) -> dict:
-    metrics = state.get("metrics_data")
-    user_id = state.get("user_id", "anonymous")
-    errors = list(state.get("errors") or [])
-    execution_path = list(state.get("execution_path") or [])
+    with _tracer.start_as_current_span("langgraph.analyze") as span:
+        metrics = state.get("metrics_data")
+        user_id = state.get("user_id", "anonymous")
+        errors = list(state.get("errors") or [])
+        execution_path = list(state.get("execution_path") or [])
+        span.set_attribute("user_id", user_id)
 
-    if not metrics:
-        errors.append("Missing metrics for analysis")
-        execution_path.append("analyze")
-        return {"errors": errors, "execution_path": execution_path}
+        if not metrics:
+            errors.append("Missing metrics for analysis")
+            execution_path.append("analyze")
+            return {"errors": errors, "execution_path": execution_path}
 
-    await _publish_node_event("analyze", f"Analyzing {metrics['metric']} anomaly", user_id)
+        await _publish_node_event("analyze", f"Analyzing {metrics['metric']} anomaly", user_id)
 
-    if is_llm_enabled():
-        prompt = f"""Analyze logistics metrics and respond JSON only:
+        if is_llm_enabled():
+            prompt = f"""Analyze logistics metrics and respond JSON only:
 Region: {metrics['region']}
 Metric: {metrics['metric']}
 Current: {metrics['current_value']}%
@@ -215,27 +241,34 @@ Threshold: {metrics['threshold']}%
 Trend: {metrics['trend']}
 Anomaly: {metrics['anomaly_detected']}
 Keys: summary, severity (critical|high|medium|low), root_causes (array), confidence (0-1)"""
-        try:
-            completion = await complete_text(system="", user=prompt, tier="analyze")
-            analysis_raw = _extract_json(completion.text if completion else "")
-            analysis = AnalysisResult(
-                summary=analysis_raw.get("summary", ""),
-                severity=analysis_raw.get("severity", "medium"),
-                root_causes=analysis_raw.get("root_causes", []),
-                confidence=float(analysis_raw.get("confidence", 0.7)),
-                model=completion.model if completion else resolve_llm_provider(),
-                tokens_used=completion.tokens_used if completion else 0,
-            )
-        except (json.JSONDecodeError, IndexError, KeyError, TypeError, RuntimeError):
-            errors.append(
-                f"Analysis failed via {resolve_llm_provider()}; using heuristic analysis"
-            )
+            try:
+                completion = await complete_text(system="", user=prompt, tier="analyze")
+                analysis_raw = _extract_json(completion.text if completion else "")
+                analysis = AnalysisResult(
+                    summary=analysis_raw.get("summary", ""),
+                    severity=analysis_raw.get("severity", "medium"),
+                    root_causes=analysis_raw.get("root_causes", []),
+                    confidence=float(analysis_raw.get("confidence", 0.7)),
+                    model=completion.model if completion else resolve_llm_provider(),
+                    tokens_used=completion.tokens_used if completion else 0,
+                )
+                span.set_attribute("llm.provider", resolve_llm_provider())
+                if completion:
+                    span.set_attribute("llm.model", completion.model)
+                    span.set_attribute("llm.tokens_used", completion.tokens_used)
+            except (json.JSONDecodeError, IndexError, KeyError, TypeError, RuntimeError):
+                errors.append(
+                    f"Analysis failed via {resolve_llm_provider()}; using heuristic analysis"
+                )
+                analysis = _heuristic_analysis(metrics)
+        else:
             analysis = _heuristic_analysis(metrics)
-    else:
-        analysis = _heuristic_analysis(metrics)
 
-    execution_path.append("analyze")
-    return {"analysis": analysis, "errors": errors, "execution_path": execution_path}
+        span.set_attribute("analysis.severity", analysis["severity"])
+        span.set_attribute("analysis.model", analysis["model"])
+
+        execution_path.append("analyze")
+        return {"analysis": analysis, "errors": errors, "execution_path": execution_path}
 
 
 def _heuristic_analysis(metrics: MetricsData) -> AnalysisResult:
@@ -263,71 +296,80 @@ def _heuristic_analysis(metrics: MetricsData) -> AnalysisResult:
 
 
 async def decide_node(state: DispatcherState) -> dict:
-    analysis = state.get("analysis")
-    user_id = state.get("user_id", "anonymous")
-    execution_path = list(state.get("execution_path") or [])
+    with _tracer.start_as_current_span("langgraph.decide") as span:
+        analysis = state.get("analysis")
+        user_id = state.get("user_id", "anonymous")
+        execution_path = list(state.get("execution_path") or [])
+        span.set_attribute("user_id", user_id)
 
-    if not analysis:
+        if not analysis:
+            execution_path.append("decide")
+            return {"execution_path": execution_path, "errors": (state.get("errors") or []) + ["Missing analysis"]}
+
+        await _publish_node_event("decide", f"Severity: {analysis['severity']}", user_id)
+
+        severity = analysis["severity"]
+        span.set_attribute("decide.severity", severity)
+
+        if severity == "critical":
+            decision_type, target_action, requires_approval = "auto_dispatch", "reroute", True
+        elif severity == "high":
+            decision_type, target_action, requires_approval = "alert_hitl", "scale_resources", True
+        elif severity == "medium":
+            decision_type, target_action, requires_approval = "alert_hitl", "monitor", False
+        else:
+            decision_type, target_action, requires_approval = "no_action", "none", False
+
+        span.set_attribute("decide.decision_type", decision_type)
+        span.set_attribute("decide.requires_approval", requires_approval)
+
+        impact_map = {"critical": 1200.0, "high": 600.0, "medium": 200.0, "low": 50.0}
+        decision = Decision(
+            decision_type=decision_type,
+            target_action=target_action,
+            estimated_impact=impact_map.get(severity, 100.0),
+            requires_approval=requires_approval,
+            reasoning=f"Severity {severity}: {analysis['summary']}",
+        )
         execution_path.append("decide")
-        return {"execution_path": execution_path, "errors": (state.get("errors") or []) + ["Missing analysis"]}
-
-    await _publish_node_event("decide", f"Severity: {analysis['severity']}", user_id)
-
-    severity = analysis["severity"]
-    if severity == "critical":
-        decision_type, target_action, requires_approval = "auto_dispatch", "reroute", True
-    elif severity == "high":
-        decision_type, target_action, requires_approval = "alert_hitl", "scale_resources", True
-    elif severity == "medium":
-        decision_type, target_action, requires_approval = "alert_hitl", "monitor", False
-    else:
-        decision_type, target_action, requires_approval = "no_action", "none", False
-
-    impact_map = {"critical": 1200.0, "high": 600.0, "medium": 200.0, "low": 50.0}
-    decision = Decision(
-        decision_type=decision_type,
-        target_action=target_action,
-        estimated_impact=impact_map.get(severity, 100.0),
-        requires_approval=requires_approval,
-        reasoning=f"Severity {severity}: {analysis['summary']}",
-    )
-    execution_path.append("decide")
-    return {"decision": decision, "execution_path": execution_path}
+        return {"decision": decision, "execution_path": execution_path}
 
 
 async def dispatch_node(state: DispatcherState) -> dict:
-    decision = state.get("decision")
-    analysis = state.get("analysis")
-    user_id = state.get("user_id", "anonymous")
-    execution_path = list(state.get("execution_path") or [])
+    with _tracer.start_as_current_span("langgraph.dispatch") as span:
+        decision = state.get("decision")
+        user_id = state.get("user_id", "anonymous")
+        execution_path = list(state.get("execution_path") or [])
+        span.set_attribute("user_id", user_id)
 
-    if not decision:
+        if not decision:
+            execution_path.append("dispatch")
+            return {
+                "execution_status": "error",
+                "execution_path": execution_path,
+                "errors": (state.get("errors") or []) + ["Missing decision"],
+            }
+
+        span.set_attribute("dispatch.target_action", decision["target_action"])
+        await _publish_node_event("dispatch", decision["target_action"], user_id)
+
+        execution_status = "completed"
+
+        if decision["requires_approval"]:
+            execution_status = "escalated"
+            await _publish_node_event("dispatch", "Escalated to HITL — awaiting approval", user_id)
+        else:
+            logger.info("[Dispatcher] Auto-executed: %s", decision["target_action"])
+            await _publish_node_event("dispatch", f"Auto-executed {decision['target_action']}", user_id)
+
+        span.set_attribute("dispatch.execution_status", execution_status)
+
         execution_path.append("dispatch")
         return {
-            "execution_status": "error",
+            "execution_status": execution_status,
+            "slack_message_ts": "",
             "execution_path": execution_path,
-            "errors": (state.get("errors") or []) + ["Missing decision"],
         }
-
-    await _publish_node_event("dispatch", decision["target_action"], user_id)
-
-    execution_status = "completed"
-
-    if decision["requires_approval"]:
-        # Mark as escalated; the API route posts to Slack after DB persist
-        # so the button value carries the real AgentAction.id.
-        execution_status = "escalated"
-        await _publish_node_event("dispatch", "Escalated to HITL — awaiting approval", user_id)
-    else:
-        logger.info("[Dispatcher] Auto-executed: %s", decision["target_action"])
-        await _publish_node_event("dispatch", f"Auto-executed {decision['target_action']}", user_id)
-
-    execution_path.append("dispatch")
-    return {
-        "execution_status": execution_status,
-        "slack_message_ts": "",
-        "execution_path": execution_path,
-    }
 
 
 def create_orchestration_graph():

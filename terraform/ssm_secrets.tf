@@ -10,6 +10,17 @@
 
 locals {
   ssm_prefix = "/${var.app_name}/${var.environment}"
+
+  # Secrets list for ECS task definition — used by ecs_service.tf and exposed
+  # via the ecs_task_secrets output for manual task definitions.
+  ecs_task_secrets = concat(
+    [{ name = "API_KEY", valueFrom = aws_ssm_parameter.api_key.arn }],
+    var.anthropic_api_key != "" ? [{ name = "ANTHROPIC_API_KEY", valueFrom = aws_ssm_parameter.anthropic_api_key[0].arn }] : [],
+    var.slack_bot_token != "" ? [{ name = "SLACK_BOT_TOKEN", valueFrom = aws_ssm_parameter.slack_bot_token[0].arn }] : [],
+    var.slack_signing_secret != "" ? [{ name = "SLACK_SIGNING_SECRET", valueFrom = aws_ssm_parameter.slack_signing_secret[0].arn }] : [],
+    var.database_url != "" ? [{ name = "DATABASE_URL", valueFrom = aws_ssm_parameter.database_url[0].arn }] : [],
+    var.redis_url != "" ? [{ name = "REDIS_URL", valueFrom = aws_ssm_parameter.redis_url[0].arn }] : [],
+  )
 }
 
 # ── Secret parameters ──────────────────────────────────────────────────────────
@@ -107,30 +118,5 @@ resource "aws_iam_policy" "ssm_read" {
 
 output "ecs_task_secrets" {
   description = "Paste into the secrets[] array of your ECS task definition JSON"
-  value = jsonencode([
-    {
-      name      = "API_KEY"
-      valueFrom = aws_ssm_parameter.api_key.arn
-    },
-    {
-      name      = "ANTHROPIC_API_KEY"
-      valueFrom = try(aws_ssm_parameter.anthropic_api_key[0].arn, "")
-    },
-    {
-      name      = "SLACK_BOT_TOKEN"
-      valueFrom = try(aws_ssm_parameter.slack_bot_token[0].arn, "")
-    },
-    {
-      name      = "SLACK_SIGNING_SECRET"
-      valueFrom = try(aws_ssm_parameter.slack_signing_secret[0].arn, "")
-    },
-    {
-      name      = "DATABASE_URL"
-      valueFrom = try(aws_ssm_parameter.database_url[0].arn, "")
-    },
-    {
-      name      = "REDIS_URL"
-      valueFrom = try(aws_ssm_parameter.redis_url[0].arn, "")
-    },
-  ])
+  value       = jsonencode(local.ecs_task_secrets)
 }

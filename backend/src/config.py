@@ -64,6 +64,21 @@ class Settings(BaseSettings):
     rate_limit_per_minute: int = 60
     rate_limit_orchestrate_per_minute: int = 10
 
+    # ── Logging ───────────────────────────────────────────────────────────────
+    # "json" emits structured JSON to stdout (CloudWatch / ECS awslogs driver).
+    # "text" uses the standard human-readable format for local development.
+    log_format: str = "text"
+
+    # ── OpenTelemetry ─────────────────────────────────────────────────────────
+    # Set OTEL_EXPORTER_OTLP_ENDPOINT to activate distributed tracing.
+    # Example (ADOT sidecar): http://localhost:4318/v1/traces
+    otel_service_name: str = "nexusflow-api"
+    otel_exporter_otlp_endpoint: str | None = None
+
+    # ── Redis reliability ─────────────────────────────────────────────────────
+    redis_max_retries: int = 3
+    redis_retry_interval_s: float = 1.0
+
 
 @lru_cache
 def get_settings() -> Settings:
