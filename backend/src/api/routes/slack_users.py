@@ -4,17 +4,21 @@ Slack user registry REST API.
 All write operations require the caller to hold admin role.
 The GET /slack/users/check endpoint is open so the Slack bot can
 gate commands without a separate credential.
+
+Roles: admin | operator | analyst | viewer  (see slack_auth.py for hierarchy)
 """
 from __future__ import annotations
 
 import logging
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from src.api.deps import get_org_id
 from src.db.session import AsyncSessionLocal
 from src.services.slack_auth import (
+    ROLE_HIERARCHY,
     _bootstrap_admin_ids,
     check_permission,
     get_user,
@@ -27,6 +31,8 @@ logger = logging.getLogger(__name__)
 
 slack_users_router = APIRouter(prefix="/slack/users", tags=["slack-users"])
 
+_ROLE_PATTERN = "^(" + "|".join(ROLE_HIERARCHY) + ")$"
+
 
 class SlackUserOut(BaseModel):
     id: str
@@ -34,13 +40,14 @@ class SlackUserOut(BaseModel):
     slack_username: str | None
     role: str
     added_by: str | None
+    org_id: str
     created_at: datetime
 
 
 class RegisterRequest(BaseModel):
     slack_user_id: str = Field(..., min_length=1)
     slack_username: str | None = None
-    role: str = Field(..., pattern=r"^(admin|analyst)$")
+    role: str = Field(..., pattern=_ROLE_PATTERN)
     caller_id: str = Field(..., description="Slack user ID of the admin issuing the request")
 
 
@@ -61,17 +68,21 @@ async def check_user_role(slack_user_id: str = Query(...)):
         "slack_user_id": user.slack_user_id,
         "slack_username": user.slack_username,
         "role": user.role,
+        "org_id": user.org_id,
         "source": "db",
     }
 
 
 @slack_users_router.get("", response_model=list[SlackUserOut])
-async def get_users(caller_id: str = Query(...)):
-    """List all registered users. Requires admin role."""
+async def get_users(
+    caller_id: str = Query(...),
+    org_id: str = Depends(get_org_id),
+):
+    """List all registered users in the org. Requires admin role."""
     async with AsyncSessionLocal() as session:
         if not await check_permission(session, caller_id, ["admin"]):
             raise HTTPException(status_code=403, detail="Admin access required")
-        users = await list_users(session)
+        users = await list_users(session, org_id=org_id)
     return [
         SlackUserOut(
             id=u.id,
@@ -79,6 +90,7 @@ async def get_users(caller_id: str = Query(...)):
             slack_username=u.slack_username,
             role=u.role,
             added_by=u.added_by,
+            org_id=u.org_id,
             created_at=u.created_at,
         )
         for u in users
@@ -86,8 +98,11 @@ async def get_users(caller_id: str = Query(...)):
 
 
 @slack_users_router.post("", response_model=SlackUserOut, status_code=201)
-async def add_user(body: RegisterRequest):
-    """Register or update a Slack user. Requires admin role."""
+async def add_user(
+    body: RegisterRequest,
+    org_id: str = Depends(get_org_id),
+):
+    """Register or update a Slack user in the org. Requires admin role."""
     async with AsyncSessionLocal() as session:
         if not await check_permission(session, body.caller_id, ["admin"]):
             raise HTTPException(status_code=403, detail="Admin access required")
@@ -97,6 +112,7 @@ async def add_user(body: RegisterRequest):
             slack_username=body.slack_username,
             role=body.role,
             added_by=body.caller_id,
+            org_id=org_id,
         )
     return SlackUserOut(
         id=user.id,
@@ -104,6 +120,7 @@ async def add_user(body: RegisterRequest):
         slack_username=user.slack_username,
         role=user.role,
         added_by=user.added_by,
+        org_id=user.org_id,
         created_at=user.created_at,
     )
 

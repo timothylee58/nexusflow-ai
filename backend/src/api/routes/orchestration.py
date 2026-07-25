@@ -3,20 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
 import logging
 import random
 from collections.abc import AsyncGenerator
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.langgraph_orchestration import execute_orchestration
-from src.api.deps import require_api_key
+from src.api.deps import get_org_id, require_api_key
 from src.db.models import AgentAction, AuditLog
 from src.db.session import get_session
 from src.services.audit_service import write_audit_log
@@ -70,9 +72,10 @@ class AuditEventRequest(BaseModel):
 async def orchestrate_query(
     request: QueryRequest,
     session: AsyncSession = Depends(get_session),
+    org_id: str = Depends(get_org_id),
 ) -> OrchestrateResponse:
     try:
-        logger.info("[Orchestrate] Query: %s", request.query)
+        logger.info("[Orchestrate] org=%s query=%s", org_id, request.query)
         result = await execute_orchestration(
             user_input=request.query,
             user_id=request.user_id,
@@ -82,6 +85,7 @@ async def orchestrate_query(
         if result.get("decision") and result.get("parsed_command"):
             action = AgentAction(
                 user_id=request.user_id,
+                org_id=org_id,
                 user_input=request.query,
                 parsed_command=json.dumps(result["parsed_command"]),
                 analysis=json.dumps(result["analysis"]) if result.get("analysis") else None,
@@ -91,7 +95,6 @@ async def orchestrate_query(
                 slack_message_ts=result.get("slack_message_ts") or None,
             )
 
-            # Persist HITL expiry if the action was escalated to Slack
             if result.get("execution_status") == "escalated" and result.get("decision", {}).get("requires_approval"):
                 from datetime import timedelta
                 from src.config import settings as _s
@@ -102,36 +105,57 @@ async def orchestrate_query(
             await session.refresh(action)
             action_id = action.id
 
-            # Post to Slack with the authoritative DB action_id as button value
             if result.get("execution_status") == "escalated":
+                severity = result["analysis"]["severity"] if result.get("analysis") else "medium"
+                summary = result["analysis"]["summary"] if result.get("analysis") else ""
+                target_action = result["decision"]["target_action"]
+                estimated_impact = result["decision"]["estimated_impact"]
+
+                # Fan out to Slack
                 try:
-                    from src.services.slack_service import post_hitl_alert as _post
-                    real_ts, _ = await _post(
+                    from src.services.slack_service import post_hitl_alert as _post_slack
+                    real_ts, _ = await _post_slack(
                         action_id=action_id,
                         user_input=request.query,
-                        severity=result["analysis"]["severity"] if result.get("analysis") else "medium",
-                        summary=result["analysis"]["summary"] if result.get("analysis") else "",
-                        target_action=result["decision"]["target_action"],
-                        estimated_impact=result["decision"]["estimated_impact"],
+                        severity=severity,
+                        summary=summary,
+                        target_action=target_action,
+                        estimated_impact=estimated_impact,
                     )
                     action.slack_message_ts = real_ts
                     await session.commit()
-                    await redis_service.publish(
-                        AGENT_LOG_CHANNEL,
-                        {
-                            "node": "dispatch",
-                            "message": f"HITL alert posted to Slack (ts={real_ts})",
-                            "timestamp": datetime.utcnow().isoformat(),
-                            "user_id": request.user_id,
-                        },
-                    )
                 except Exception as _exc:
                     logger.warning("[Orchestrate] Slack HITL post failed: %s", _exc)
+
+                # Fan out to Teams (non-blocking)
+                try:
+                    from src.services.teams_service import post_hitl_alert as _post_teams
+                    await _post_teams(
+                        action_id=action_id,
+                        user_input=request.query,
+                        severity=severity,
+                        summary=summary,
+                        target_action=target_action,
+                        estimated_impact=estimated_impact,
+                    )
+                except Exception as _exc:
+                    logger.warning("[Orchestrate] Teams HITL post failed: %s", _exc)
+
+                await redis_service.publish(
+                    AGENT_LOG_CHANNEL,
+                    {
+                        "node": "dispatch",
+                        "message": f"HITL alert dispatched (action={action_id})",
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "user_id": request.user_id,
+                    },
+                )
 
             await write_audit_log(
                 session,
                 event_type="orchestration_executed",
                 user_id=request.user_id,
+                org_id=org_id,
                 user_input=request.query,
                 execution_path=result.get("execution_path"),
                 severity=result["analysis"]["severity"] if result.get("analysis") else None,
@@ -162,6 +186,7 @@ async def orchestrate_query(
 async def approve_decision(
     body: HitlApprovalRequest,
     session: AsyncSession = Depends(get_session),
+    org_id: str = Depends(get_org_id),
 ) -> dict:
     if body.approval_choice not in {"approve", "reject"}:
         raise HTTPException(status_code=400, detail="approval_choice must be approve or reject")
@@ -186,6 +211,7 @@ async def approve_decision(
         session,
         event_type=f"hitl_{body.approval_choice}",
         user_id=body.user_id,
+        org_id=org_id,
         user_input=action.user_input,
         approval_choice=body.approval_choice,
         notes=body.notes,
@@ -202,7 +228,6 @@ async def approve_decision(
         },
     )
 
-    # Mirror resolution to Slack if a message was posted
     if action.slack_message_ts:
         try:
             from src.services.slack_service import update_hitl_message
@@ -268,11 +293,13 @@ async def stream_agent_log(request: Request) -> StreamingResponse:
 async def log_audit_event(
     body: AuditEventRequest,
     session: AsyncSession = Depends(get_session),
+    org_id: str = Depends(get_org_id),
 ) -> dict:
     entry = await write_audit_log(
         session,
         event_type=body.event_type,
         user_id=body.user_id,
+        org_id=org_id,
         user_input=body.user_input,
         execution_path=body.execution_path,
         payload=body.payload,
@@ -289,8 +316,14 @@ async def log_audit_event(
 async def recent_audit_logs(
     limit: int = 20,
     session: AsyncSession = Depends(get_session),
+    org_id: str = Depends(get_org_id),
 ) -> dict:
-    query = select(AuditLog).order_by(AuditLog.created_at.desc()).limit(min(limit, 100))
+    query = (
+        select(AuditLog)
+        .where(AuditLog.org_id == org_id)
+        .order_by(AuditLog.created_at.desc())
+        .limit(min(limit, 100))
+    )
     result = await session.execute(query)
     logs = result.scalars().all()
     return {
@@ -301,11 +334,118 @@ async def recent_audit_logs(
                 "user_id": log.user_id,
                 "user_input": log.user_input,
                 "approval_choice": log.approval_choice,
+                "severity": log.severity,
+                "estimated_impact": log.estimated_impact,
                 "created_at": log.created_at.isoformat(),
             }
             for log in logs
         ]
     }
+
+
+@audit_router.get("/export")
+async def export_audit_logs(
+    format: str = Query(default="json", pattern="^(json|csv)$"),
+    from_date: str | None = Query(default=None, alias="from"),
+    to_date: str | None = Query(default=None, alias="to"),
+    event_type: str | None = None,
+    session: AsyncSession = Depends(get_session),
+    org_id: str = Depends(get_org_id),
+) -> StreamingResponse:
+    """Export audit logs for compliance. Supports JSON and CSV.
+
+    Query params:
+      format    — json (default) | csv
+      from      — ISO date lower bound, e.g. 2025-01-01
+      to        — ISO date upper bound, e.g. 2025-12-31
+      event_type — filter to a single event type
+    """
+    conditions = [AuditLog.org_id == org_id]
+    if from_date:
+        try:
+            conditions.append(AuditLog.created_at >= datetime.fromisoformat(from_date))
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid 'from' date: {from_date}")
+    if to_date:
+        try:
+            conditions.append(AuditLog.created_at <= datetime.fromisoformat(to_date))
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid 'to' date: {to_date}")
+    if event_type:
+        conditions.append(AuditLog.event_type == event_type)
+
+    result = await session.execute(
+        select(AuditLog).where(*conditions).order_by(AuditLog.created_at.asc())
+    )
+    logs = result.scalars().all()
+
+    _FIELDS = [
+        "id", "event_type", "user_id", "org_id", "user_input",
+        "approval_choice", "notes", "severity", "estimated_impact",
+        "execution_path", "payload", "created_at",
+    ]
+
+    if format == "csv":
+        def _csv_stream() -> AsyncGenerator[str, None]:
+            buf = io.StringIO()
+            writer = csv.DictWriter(buf, fieldnames=_FIELDS, extrasaction="ignore")
+            writer.writeheader()
+            yield buf.getvalue()
+            for log in logs:
+                buf = io.StringIO()
+                writer = csv.DictWriter(buf, fieldnames=_FIELDS, extrasaction="ignore")
+                writer.writerow({
+                    "id": log.id,
+                    "event_type": log.event_type,
+                    "user_id": log.user_id or "",
+                    "org_id": log.org_id,
+                    "user_input": log.user_input or "",
+                    "approval_choice": log.approval_choice or "",
+                    "notes": log.notes or "",
+                    "severity": log.severity or "",
+                    "estimated_impact": log.estimated_impact or "",
+                    "execution_path": log.execution_path or "",
+                    "payload": log.payload or "",
+                    "created_at": log.created_at.isoformat(),
+                })
+                yield buf.getvalue()
+
+        async def _async_csv() -> AsyncGenerator[str, None]:
+            for chunk in _csv_stream():
+                yield chunk
+
+        stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+        return StreamingResponse(
+            _async_csv(),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="audit_{org_id}_{stamp}.csv"'},
+        )
+
+    # JSON streaming
+    async def _json_stream() -> AsyncGenerator[str, None]:
+        yield '{"items":['
+        for i, log in enumerate(logs):
+            row = {
+                "id": log.id,
+                "event_type": log.event_type,
+                "user_id": log.user_id,
+                "org_id": log.org_id,
+                "user_input": log.user_input,
+                "approval_choice": log.approval_choice,
+                "notes": log.notes,
+                "severity": log.severity,
+                "estimated_impact": log.estimated_impact,
+                "execution_path": log.execution_path,
+                "payload": log.payload,
+                "created_at": log.created_at.isoformat(),
+            }
+            yield ("" if i == 0 else ",") + json.dumps(row)
+        yield "]}"
+
+    return StreamingResponse(
+        _json_stream(),
+        media_type="application/json",
+    )
 
 
 def _mock_regional_metrics(region: str) -> dict:

@@ -211,7 +211,7 @@ class TestSlackUsersListRoute:
             patch("backend.src.api.routes.slack_users.check_permission", return_value=False),
         ):
             with pytest.raises(HTTPException) as exc_info:
-                await get_users(caller_id="U_ANALYST")
+                await get_users(caller_id="U_ANALYST", org_id="default")
         assert exc_info.value.status_code == 403
 
     @pytest.mark.asyncio
@@ -228,6 +228,7 @@ class TestSlackUsersListRoute:
         fake_user.slack_username = "alice"
         fake_user.role = "analyst"
         fake_user.added_by = "U_ADMIN"
+        fake_user.org_id = "default"
         fake_user.created_at = datetime.utcnow()
 
         with (
@@ -235,7 +236,7 @@ class TestSlackUsersListRoute:
             patch("backend.src.api.routes.slack_users.check_permission", return_value=True),
             patch("backend.src.api.routes.slack_users.list_users", return_value=[fake_user]),
         ):
-            result = await get_users(caller_id="U_ADMIN")
+            result = await get_users(caller_id="U_ADMIN", org_id="default")
 
         assert len(result) == 1
         assert result[0].slack_user_id == "U_ANA"
@@ -261,7 +262,7 @@ class TestSlackUsersAddRoute:
             patch("backend.src.api.routes.slack_users.check_permission", return_value=False),
         ):
             with pytest.raises(HTTPException) as exc_info:
-                await add_user(body)
+                await add_user(body, org_id="default")
         assert exc_info.value.status_code == 403
 
     @pytest.mark.asyncio
@@ -278,6 +279,7 @@ class TestSlackUsersAddRoute:
         saved_user.slack_username = None
         saved_user.role = "analyst"
         saved_user.added_by = "U_ADMIN"
+        saved_user.org_id = "default"
         saved_user.created_at = datetime.utcnow()
 
         body = RegisterRequest(

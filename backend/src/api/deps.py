@@ -1,4 +1,4 @@
-"""Shared FastAPI dependencies — API key auth and rate limiting."""
+"""Shared FastAPI dependencies — API key auth, rate limiting, org-ID."""
 from __future__ import annotations
 
 import logging
@@ -103,6 +103,15 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 )
 
         return await call_next(request)
+
+
+# ─── Security response headers ────────────────────────────────────────────────
+
+# ─── Multi-tenant org scoping ─────────────────────────────────────────────────
+
+def get_org_id(request: Request) -> str:
+    """Extract tenant org-ID from X-Org-ID header; defaults to 'default'."""
+    return request.headers.get(settings.org_id_header, settings.default_org_id).strip() or settings.default_org_id
 
 
 # ─── Security response headers ────────────────────────────────────────────────
