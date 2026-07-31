@@ -1,29 +1,23 @@
 import "dotenv/config";
 import { fetchFederalHighwaySample } from "./fetchers/federal-highway.js";
 import { fetchLdpSample } from "./fetchers/ldp.js";
+import { fetchAllSyntheticSamples } from "./fetchers/synthetic.js";
 import { publishIngestionEvent } from "./redis-producer.js";
 
 const CHANNEL = process.env.INGESTION_REDIS_CHANNEL ?? "nexusflow:traffic";
-const INTERVAL_MS = Number(process.env.INGESTION_INTERVAL_MS ?? "60000");
+const INTERVAL_MS = Number(process.env.INGESTION_INTERVAL_MS ?? "15000");
 
 async function tick() {
   const apiKey = process.env.TRAFFIC_API_KEY;
+
+  // Try live API fetchers first; fall back to synthetic data (always available)
   const fh = await fetchFederalHighwaySample(apiKey);
   const ldp = await fetchLdpSample(apiKey);
-  const batch = [fh, ldp].filter(Boolean);
+  const liveData = [fh, ldp].filter(Boolean);
 
-  if (batch.length === 0) {
-    const heartbeat = {
-      source: "ingestion",
-      capturedAt: new Date().toISOString(),
-      payload: { note: "No external keys configured; heartbeat only" },
-    };
-    await publishIngestionEvent(CHANNEL, heartbeat);
-    console.log("[ingestion] heartbeat published");
-    return;
-  }
+  const samples = liveData.length > 0 ? liveData : fetchAllSyntheticSamples();
 
-  for (const sample of batch) {
+  for (const sample of samples) {
     await publishIngestionEvent(CHANNEL, sample);
     console.log("[ingestion] published", sample?.source);
   }
