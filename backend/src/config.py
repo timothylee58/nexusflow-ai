@@ -97,6 +97,10 @@ class Settings(BaseSettings):
     org_id_header: str = "X-Org-ID"
     default_org_id: str = "default"
 
+    # ── VidStega audit trail ──────────────────────────────────────────────────
+    # HMAC-SHA256 signing secret for tamper-proof LSB steganography receipts.
+    vidstega_signing_secret: str = "change-me-in-production"
+
 
 @lru_cache
 def get_settings() -> Settings:

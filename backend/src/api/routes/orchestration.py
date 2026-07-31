@@ -19,11 +19,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.langgraph_orchestration import execute_orchestration
 from src.api.deps import get_org_id, require_api_key
+from src.config import settings
 from src.db.models import AgentAction, AuditLog
 from src.db.session import get_session
 from src.services.audit_service import write_audit_log
 from src.services.llm_provider import resolve_llm_provider
 from src.services.redis_service import AGENT_LOG_CHANNEL, redis_service
+
+TRAFFIC_CHANNEL = "nexusflow:traffic"
 
 logger = logging.getLogger(__name__)
 
@@ -258,14 +261,39 @@ async def approve_decision(
 async def stream_metrics(request: Request) -> StreamingResponse:
     async def metrics_generator() -> AsyncGenerator[str, None]:
         regions = ["MY", "SG", "HK", "TW"]
-        while True:
-            if await request.is_disconnected():
-                break
-            for region in regions:
-                metrics = _mock_regional_metrics(region)
-                yield f"data: {json.dumps(metrics)}\n\n"
-                await asyncio.sleep(0.35)
-            await asyncio.sleep(1)
+        live_cache: dict[str, dict] = {}
+
+        async def _traffic_listener() -> None:
+            async for raw in redis_service.subscribe(TRAFFIC_CHANNEL):
+                try:
+                    sample = json.loads(raw) if isinstance(raw, str) else raw
+                    payload = sample.get("payload", {})
+                    region = payload.get("region")
+                    if region and region in regions:
+                        live_cache[region] = {
+                            "type": "metrics_update",
+                            "region": region,
+                            "congestion": payload.get("congestion", 50),
+                            "avg_delivery_time": payload.get("avg_delivery_time", 3.0),
+                            "active_deliveries": payload.get("active_deliveries", 1000),
+                            "active_incidents": payload.get("active_incidents", 0),
+                            "last_updated": payload.get("capturedAt", datetime.utcnow().isoformat()),
+                        }
+                except Exception:
+                    pass
+
+        listener = asyncio.create_task(_traffic_listener())
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                for region in regions:
+                    metrics = live_cache.get(region) or _mock_regional_metrics(region)
+                    yield f"data: {json.dumps(metrics)}\n\n"
+                    await asyncio.sleep(0.35)
+                await asyncio.sleep(1)
+        finally:
+            listener.cancel()
 
     return StreamingResponse(
         metrics_generator(),
@@ -460,3 +488,94 @@ def _mock_regional_metrics(region: str) -> dict:
         "active_incidents": random.randint(0, 5 if congestion > 75 else 2),
         "last_updated": datetime.utcnow().isoformat(),
     }
+
+
+# ── VidStega tamper-proof audit receipts ──────────────────────────────────────
+
+class VidStegaCreateRequest(BaseModel):
+    decision_id: str
+    ai_reasoning: dict
+    user_approval: str
+    amount: float = 0.0
+
+
+class VidStegaVerifyRequest(BaseModel):
+    image_b64: str
+    signature: str
+
+
+@audit_router.post("/vidstega/create")
+async def create_vidstega_receipt(body: VidStegaCreateRequest) -> dict:
+    import base64
+    from src.services.vidstega_audit import VidStegaAuditTrail
+
+    trail = VidStegaAuditTrail(signing_secret=settings.vidstega_signing_secret)
+    image_bytes, signature = trail.create_audit_record(
+        decision_id=body.decision_id,
+        ai_reasoning=body.ai_reasoning,
+        user_approval=body.user_approval,
+        amount=body.amount,
+    )
+    return {
+        "decision_id": body.decision_id,
+        "image_b64": base64.b64encode(image_bytes).decode(),
+        "signature": signature,
+    }
+
+
+@audit_router.post("/vidstega/verify")
+async def verify_vidstega_receipt(body: VidStegaVerifyRequest) -> dict:
+    import base64
+    from src.services.vidstega_audit import VidStegaAuditTrail
+
+    trail = VidStegaAuditTrail(signing_secret=settings.vidstega_signing_secret)
+    try:
+        image_bytes = base64.b64decode(body.image_b64)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid base64 image data")
+    return trail.verify_audit_record(image_bytes, body.signature)
+
+
+from fastapi.responses import Response as FastAPIResponse
+
+
+@audit_router.get("/receipt/{action_id}")
+async def get_action_receipt(
+    action_id: str,
+    session: AsyncSession = Depends(get_session),
+    org_id: str = Depends(get_org_id),
+) -> FastAPIResponse:
+    from src.services.vidstega_audit import VidStegaAuditTrail
+
+    result = await session.execute(
+        select(AgentAction).where(
+            AgentAction.id == action_id,
+            AgentAction.org_id == org_id,
+        )
+    )
+    action = result.scalar_one_or_none()
+    if action is None:
+        raise HTTPException(status_code=404, detail="Action not found")
+
+    analysis = json.loads(action.analysis) if action.analysis else {}
+    decision = json.loads(action.decision) if action.decision else {}
+    ai_reasoning = {
+        "user_input": action.user_input,
+        "execution_path": json.loads(action.execution_path) if action.execution_path else [],
+        "severity": analysis.get("severity", "unknown"),
+        "summary": analysis.get("summary", ""),
+        "target_action": decision.get("target_action", ""),
+    }
+
+    trail = VidStegaAuditTrail(signing_secret=settings.vidstega_signing_secret)
+    image_bytes, signature = trail.create_audit_record(
+        decision_id=action_id,
+        ai_reasoning=ai_reasoning,
+        user_approval=action.execution_status or "pending",
+        amount=float(decision.get("estimated_impact", 0.0)),
+    )
+    return FastAPIResponse(
+        content=image_bytes,
+        media_type="image/png",
+        headers={"X-VidStega-Signature": signature},
+    )

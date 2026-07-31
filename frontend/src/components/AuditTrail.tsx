@@ -1,7 +1,8 @@
 /**
- * AuditTrail – Weeks 5-6 VidStega tamper-proof record viewer
+ * AuditTrail – VidStega tamper-proof record viewer
  */
 import React, { useState } from "react";
+import { apiFetch } from "@/lib/api";
 
 interface AuditResult {
   valid: boolean;
@@ -20,9 +21,8 @@ export default function AuditTrail() {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch("/api/audit/create", {
+      const response = await apiFetch("/api/audit/vidstega/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           decision_id: `DEC-${Date.now()}`,
           ai_reasoning: {
@@ -48,9 +48,8 @@ export default function AuditTrail() {
     if (!auditResult?.image_b64 || !auditResult?.signature) return;
     setLoading(true);
     try {
-      const response = await fetch("/api/audit/verify", {
+      const response = await apiFetch("/api/audit/vidstega/verify", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           image_b64: auditResult.image_b64,
           signature: auditResult.signature,

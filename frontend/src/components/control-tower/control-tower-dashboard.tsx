@@ -5,8 +5,10 @@ import { AnimatePresence, motion } from "framer-motion";
 import {
   Activity,
   AlertCircle,
+  Building2,
   ChevronRight,
   Command,
+  Download,
   Loader2,
   TrendingUp,
   AlertTriangle,
@@ -21,6 +23,7 @@ import { AlertList } from "@/components/nexusops/AlertList";
 import { ActionDetails } from "@/components/nexusops/ActionDetails";
 import { ConfirmationPanel } from "@/components/nexusops/ConfirmationPanel";
 import { useSSE } from "@/hooks/useSSE";
+import { apiFetch, getOrgId, setOrgId } from "@/lib/api";
 
 /* ─── Types ─────────────────────────────────────────────────────────────── */
 
@@ -82,18 +85,16 @@ function NLCommandBar({
     setInput("");
 
     try {
-      const res = await fetch("/api/agent/orchestrate", {
+      const res = await apiFetch("/api/agent/orchestrate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: trimmed, user_id: `user_${Date.now()}` }),
       });
       if (!res.ok) throw new Error(await res.text());
       const data = (await res.json()) as OrchestrationResult;
       onResult(data, false);
 
-      await fetch("/api/audit/log", {
+      await apiFetch("/api/audit/log", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           event_type: "nl_command_executed",
           user_input: trimmed,
@@ -378,6 +379,78 @@ function AgentActivityLog() {
   );
 }
 
+/* ─── Org-ID Switcher ────────────────────────────────────────────────────── */
+
+function OrgSwitcher() {
+  const [orgId, setOrgIdState] = useState(() => getOrgId());
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(orgId);
+
+  function save() {
+    const trimmed = draft.trim() || "default";
+    setOrgId(trimmed);
+    setOrgIdState(trimmed);
+    setEditing(false);
+  }
+
+  return (
+    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+      <Building2 className="h-3.5 w-3.5" />
+      {editing ? (
+        <>
+          <input
+            autoFocus
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") save(); if (e.key === "Escape") setEditing(false); }}
+            className="w-28 rounded border border-border bg-background px-1.5 py-0.5 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+          />
+          <button type="button" onClick={save} className="text-primary hover:underline">Save</button>
+        </>
+      ) : (
+        <>
+          <span className="font-mono">{orgId}</span>
+          <button type="button" onClick={() => { setDraft(orgId); setEditing(true); }} className="hover:text-foreground">
+            edit
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ─── Audit Export Button ────────────────────────────────────────────────── */
+
+function AuditExportButton() {
+  const [busy, setBusy] = useState(false);
+
+  async function downloadCsv() {
+    setBusy(true);
+    try {
+      const res = await apiFetch("/api/audit/export?format=csv");
+      if (!res.ok) throw new Error(`Export failed: ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `audit_${getOrgId()}_${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error("Audit export error", e);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Button variant="outline" size="sm" onClick={downloadCsv} disabled={busy} className="gap-1.5 text-xs">
+      {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+      Export audit CSV
+    </Button>
+  );
+}
+
 /* ─── Main Dashboard ─────────────────────────────────────────────────────── */
 
 export function ControlTowerDashboard() {
@@ -398,12 +471,18 @@ export function ControlTowerDashboard() {
       <motion.header
         initial={{ opacity: 0, y: -12 }}
         animate={{ opacity: 1, y: 0 }}
-        className="space-y-1"
+        className="flex items-start justify-between gap-4"
       >
-        <h1 className="text-3xl font-bold tracking-tight">NexusOps Control Tower</h1>
-        <p className="text-muted-foreground">
-          LangGraph orchestration · SSE real-time metrics · HITL approval · audit trail
-        </p>
+        <div className="space-y-1">
+          <h1 className="text-3xl font-bold tracking-tight">NexusOps Control Tower</h1>
+          <p className="text-muted-foreground">
+            LangGraph orchestration · SSE real-time metrics · HITL approval · audit trail
+          </p>
+        </div>
+        <div className="flex flex-col items-end gap-2 pt-1">
+          <OrgSwitcher />
+          <AuditExportButton />
+        </div>
       </motion.header>
 
       <NLCommandBar onResult={handleResult} />
